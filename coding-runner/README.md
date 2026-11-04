@@ -133,30 +133,25 @@ implementation or review. The cumulative CLI invocation limit still applies.
 
 ## One uninterrupted CLI run for implementation and test repair
 
-Local validation follows the repository's automatic PR/push CI workflows: the
-same test selection, runtime/package-manager versions, service images and setup,
-including separately named required test jobs. Only two categories are allowed:
+The only allowed local validation command is the complete, unfiltered
+`pnpm test:all`. CI configuration supplies its runtime/package-manager versions,
+service images and setup; it does not authorize additional local validation.
+Separate CI jobs are not exceptions. Individual files, focused tests, constituent
+lanes such as `test:native`, broader scenarios, benchmarks, typecheck, formatting
+checks, build, infrastructure checks and Terraform validation must not run separately.
+Independent CI checks and review gates still apply before merge.
 
-1. `pnpm test:all` as the baseline.
-2. Required automatic CI checks it omits, such as typecheck, formatting, build,
-   or a separately required CI test job.
+The AI inspects failures, fixes code and reruns `pnpm test:all`, preserving the
+repository's local test budget. It reuses unchanged passing results on resume.
+General acceptance wording, reviewer requests and earlier plans do not expand this
+allowed set. Functional acceptance criteria and known product failures still must
+be addressed; tests and assertions must not be weakened, or expensive suites added
+to the gate, to bypass this policy.
 
-No individual test files, focused tests, extra suites, benchmarks, or ad hoc test
-scripts run outside those categories, including while debugging. The AI inspects
-failures, fixes code, and reruns the affected allowed command rather than selecting
-a narrower test run. It respects local test budgets and available resources, and
-reuses unchanged passing results across resumed sessions. It does not rerun
-constituent lanes already covered by `pnpm test:all`.
-
-Extended, exhaustive, stress/capacity and manual-only suites are excluded unless
-already included in the baseline or required automatic CI. General acceptance
-wording, reviewer requests and earlier agent plans do not expand the allowed set.
-Functional acceptance criteria, meaningful
-critical regression coverage and known product failures still must be addressed;
-tests and assertions must not be weakened to shorten a run. Optional unrun or
-interrupted checks are reported as limitations in `tests`/`summary`, not claimed
-as passes or made into automatic retry gates. `test_results` reports actual latest
-outcomes for checks in the two allowed categories.
+On resume, the AI stops leftover validation outside `pnpm test:all` and cleans up
+its temporary services. Unrun or interrupted extra checks are reported honestly in
+`tests`/`summary`; they do not by themselves block local completion or trigger a
+retry. `test_results` contains only the latest actual `pnpm test:all` result.
 This policy is sent on every new and resumed invocation. Rebuild the coding image
 to apply prompt changes to newly launched containers; existing invocations retain
 their original prompt until stopped and resumed with the rebuilt image.

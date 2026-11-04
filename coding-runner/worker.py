@@ -382,39 +382,37 @@ dependency and explain why it cannot be implemented as part of this issue.
 Reason for this CLI run: {reason}
 
 Local validation policy (applies to new and resumed jobs):
-Use the repository's automatic pull-request/push CI workflows as the source of
-truth for local validation. Read their commands, package scripts, test selection,
-runtime/package-manager versions, service images, and environment setup before
-choosing tests. Use the same setup and coverage locally, including any separately
-named required CI test jobs. Respect change filters and bound concurrency to the
-available CPU/memory; CI shards may run sequentially locally without dropping any
-shard's coverage. Do not deploy or use production credentials to reproduce CI.
-Local validation is limited to exactly these two categories:
-1. pnpm test:all as the baseline.
-2. Required automatic CI checks that pnpm test:all does not cover, such as
-   typecheck, formatting, build, or a separately required CI test job.
+The only allowed local validation command is the complete, unfiltered pnpm test:all.
+Use repository package scripts and CI configuration to match its runtime/package-manager
+versions, service images and environment setup, not to expand local test coverage.
 Do not run individual test files, focused tests, extra suites, benchmarks, or
-ad hoc test scripts outside those two categories, even while debugging. Do not
-run constituent test lanes separately when pnpm test:all already covers them.
-Extended, exhaustive, stress/capacity, and manual-only suites are excluded unless
-they are already part of the baseline or a required automatic CI check.
+ad hoc test scripts, even while debugging. Do not separately run test:native,
+other constituent lanes, typecheck, formatting checks, build, infrastructure checks,
+Terraform validation, or any other validation command outside pnpm test:all.
+A separately required automatic CI job is NOT an exception to this policy.
+Extended, exhaustive, stress/capacity and broader scenario suites may run locally
+only if already included in pnpm test:all; do not add them to that gate to bypass
+this restriction. Leave independent CI checks to CI. Do not deploy or use
+production credentials for validation.
 Preserve repository local test budgets. Inspect failures and fix code, then rerun
-the affected allowed command; do not create a narrower test invocation. Reuse
-passing results when their code, configuration and inputs have not changed.
+pnpm test:all; do not create a narrower test invocation. Reuse passing results when
+their code, configuration and inputs have not changed.
 Do not repeat a complete passing gate just because a session resumed.
 
-Generic acceptance wording, review feedback, and earlier agent plans do not
-expand this allowed validation set. Preserve functional acceptance criteria and
-add meaningful critical regression coverage to the normal CI lanes for changed behavior. Do not
-remove tests, weaken assertions, change lane membership merely to avoid a failure,
-or ignore known product failures. An optional extended run that was not executed
-or was interrupted does not by itself require another coding round or block PR
-submission once implementation and required CI-equivalent validation are complete.
-Record optional validation limitations honestly in tests/summary; do not label
-unrun or canceled checks as passing. test_results must report the actual latest
-results for checks in the two allowed categories.
+Generic acceptance wording, review feedback, CI job definitions, and earlier agent
+plans do not expand this allowed validation set. Preserve functional acceptance
+criteria and add meaningful critical regression coverage to the normal test lanes
+for changed behavior. Do not remove tests, weaken assertions, change lane membership
+merely to avoid a failure, or ignore known product failures.
+An unrun or interrupted check outside pnpm test:all does not by itself require
+another coding round or block PR submission once implementation and pnpm test:all
+are complete. Record such validation limitations honestly in tests/summary; do not
+label unrun or canceled checks as passing. test_results must report only the actual
+latest pnpm test:all result. Independent CI and review gates still apply before merge.
 On resume, reassess historical next_steps using this policy; an earlier agent's
-decision to run additional tests does not authorize rerunning them.
+decision to run additional tests does not authorize rerunning them. Stop any leftover
+local validation outside pnpm test:all and clean up its temporary services; do not
+wait for it to finish or restart it. Reuse an unchanged passing pnpm test:all result.
 
 The trusted controller handles commits, pushes, PR creation, reviewer requests,
 merging and issue closure. Do not perform these operations or call gh. Only edit
@@ -902,7 +900,7 @@ Previous model-call error (JSON, if any):
             if failures:
                 key = 'ci:' + pr['head']['sha']
                 if key not in self.state['handled']:
-                    reasons.append('Fix failing CI checks; reproduce failures locally')
+                    reasons.append('Fix failing CI checks using their logs; validate locally only with pnpm test:all')
                     feedback = [*feedback, {'key': key, 'checks': self.ci_feedback(failures)}]
             if reasons:
                 self.work(issue, '; '.join(reasons), feedback)
