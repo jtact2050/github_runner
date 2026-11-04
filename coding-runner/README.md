@@ -135,21 +135,28 @@ implementation or review. The cumulative CLI invocation limit still applies.
 
 Local validation follows the repository's automatic PR/push CI workflows: the
 same test selection, runtime/package-manager versions, service images and setup,
-including separately named required test jobs. The AI uses the repository's local
-aggregate command when it covers those lanes, adds omitted CI checks, respects
-local test budgets, and bounds concurrency to available resources. It does not
-run both the aggregate and all its constituent lanes again. Focused checks run
-during fixes; unchanged passing results can be reused across resumed sessions.
+including separately named required test jobs. Only two categories are allowed:
 
-Extended, exhaustive, stress/capacity and manual-only suites require an explicit
-user or actionable reviewer request for that suite/scenario. Selecting an extended
-file directly is also opt-in. General implementation/acceptance requirements and
-an earlier agent's plan do not opt in. Functional acceptance criteria, meaningful
+1. `pnpm test:all` as the baseline.
+2. Required automatic CI checks it omits, such as typecheck, formatting, build,
+   or a separately required CI test job.
+
+No individual test files, focused tests, extra suites, benchmarks, or ad hoc test
+scripts run outside those categories, including while debugging. The AI inspects
+failures, fixes code, and reruns the affected allowed command rather than selecting
+a narrower test run. It respects local test budgets and available resources, and
+reuses unchanged passing results across resumed sessions. It does not rerun
+constituent lanes already covered by `pnpm test:all`.
+
+Extended, exhaustive, stress/capacity and manual-only suites are excluded unless
+already included in the baseline or required automatic CI. General acceptance
+wording, reviewer requests and earlier agent plans do not expand the allowed set.
+Functional acceptance criteria, meaningful
 critical regression coverage and known product failures still must be addressed;
 tests and assertions must not be weakened to shorten a run. Optional unrun or
 interrupted checks are reported as limitations in `tests`/`summary`, not claimed
 as passes or made into automatic retry gates. `test_results` reports actual latest
-outcomes for required CI-equivalent checks and explicitly requested extra checks.
+outcomes for checks in the two allowed categories.
 This policy is sent on every new and resumed invocation. Rebuild the coding image
 to apply prompt changes to newly launched containers; existing invocations retain
 their original prompt until stopped and resumed with the rebuilt image.

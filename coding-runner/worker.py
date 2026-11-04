@@ -389,28 +389,32 @@ choosing tests. Use the same setup and coverage locally, including any separatel
 named required CI test jobs. Respect change filters and bound concurrency to the
 available CPU/memory; CI shards may run sequentially locally without dropping any
 shard's coverage. Do not deploy or use production credentials to reproduce CI.
-Use the repository's aggregate local command (for example pnpm test:all) when it
-covers those CI test lanes, plus any CI checks it omits, rather than running both
-the aggregate and the same lanes again. Preserve repository local test budgets.
-Run focused checks while fixing code, then required CI-equivalent checks on the
-final edits; reuse passing results when their code, configuration and inputs have
-not changed. Do not repeat a complete passing gate just because a session resumed.
+Local validation is limited to exactly these two categories:
+1. pnpm test:all as the baseline.
+2. Required automatic CI checks that pnpm test:all does not cover, such as
+   typecheck, formatting, build, or a separately required CI test job.
+Do not run individual test files, focused tests, extra suites, benchmarks, or
+ad hoc test scripts outside those two categories, even while debugging. Do not
+run constituent test lanes separately when pnpm test:all already covers them.
+Extended, exhaustive, stress/capacity, and manual-only suites are excluded unless
+they are already part of the baseline or a required automatic CI check.
+Preserve repository local test budgets. Inspect failures and fix code, then rerun
+the affected allowed command; do not create a narrower test invocation. Reuse
+passing results when their code, configuration and inputs have not changed.
+Do not repeat a complete passing gate just because a session resumed.
 
-Extended, exhaustive, stress/capacity, and manual-only workflow suites are opt-in.
-Do not run them, including by explicitly selecting an extended test file, unless
-the user or actionable review feedback explicitly requests that suite/scenario.
-Generic requirements for complete implementation or acceptance do not opt in to
-every extended suite. Preserve functional acceptance criteria and add meaningful
-critical regression coverage to the normal CI lanes for changed behavior. Do not
+Generic acceptance wording, review feedback, and earlier agent plans do not
+expand this allowed validation set. Preserve functional acceptance criteria and
+add meaningful critical regression coverage to the normal CI lanes for changed behavior. Do not
 remove tests, weaken assertions, change lane membership merely to avoid a failure,
 or ignore known product failures. An optional extended run that was not executed
 or was interrupted does not by itself require another coding round or block PR
 submission once implementation and required CI-equivalent validation are complete.
 Record optional validation limitations honestly in tests/summary; do not label
 unrun or canceled checks as passing. test_results must report the actual latest
-results for required checks and any explicitly requested extra validation.
+results for checks in the two allowed categories.
 On resume, reassess historical next_steps using this policy; an earlier agent's
-decision to run an extended suite is not an explicit request to keep rerunning it.
+decision to run additional tests does not authorize rerunning them.
 
 The trusted controller handles commits, pushes, PR creation, reviewer requests,
 merging and issue closure. Do not perform these operations or call gh. Only edit
@@ -435,12 +439,14 @@ work, after each test run, and when changing direction. Report the current step,
 files changed, exact validation commands, observed failures, fixes, and remaining
 work. For long commands, enable their normal progress output and report their
 actual outcome. Do not expose secrets or invent progress/percentages.
-Implement, run relevant tests/typechecks, inspect failures, fix their causes, and
-rerun affected checks until they pass. Add regression coverage for bugs you find.
+Implement, run checks within the allowed validation set, inspect failures, fix
+their causes, and rerun affected allowed checks until they pass. Add regression
+coverage for bugs you find to the normal CI lanes.
 Do not stop merely because a test fails or scoped implementation remains unfinished.
 Do not weaken assertions, remove coverage, or bypass runtime controls to get a pass.
 Before returning completed, finish the requested development scope and rerun all
-relevant validation against your final edits. Passing unrelated tests is insufficient.
+required validation within the allowed set against your final edits. Passing
+unrelated tests is insufficient.
 Report exact commands, actual exit codes, and outcomes in test_results (null means
 not run/unknown). Each entry describes the latest run of that check after fixes;
 describe earlier failures and fixes in tests/summary. Never invent test results.
