@@ -131,6 +131,13 @@ and removed when the saved worker resumes; no special restart option is needed.
 The same issue's workspace and workflow progress are retained to resume
 implementation or review. The cumulative CLI invocation limit still applies.
 
+If a PR reports an older commit after a successful push, the worker checks the
+actual remote branch. When it matches the local commit, the worker stays in
+`waiting_pr_sync` and polls for up to the configured review timeout instead of
+restarting or running another coding round. CI and review processing resume only
+after the PR reports that commit. A genuinely different remote branch still
+blocks the worker and preserves the workspace for inspection.
+
 ## One uninterrupted CLI run for implementation and test repair
 
 The only allowed local validation command is the complete, unfiltered
@@ -140,6 +147,18 @@ Separate CI jobs are not exceptions. Individual files, focused tests, constituen
 lanes such as `test:native`, broader scenarios, benchmarks, typecheck, formatting
 checks, build, infrastructure checks and Terraform validation must not run separately.
 Independent CI checks and review gates still apply before merge.
+
+Required PR, push, merge and deployment test gates must stay fast. The coder must
+not add slow full-journey, exhaustive, stress/capacity or broad-matrix suites to
+those gates, including through explicit file lists, lane changes, matrices or
+required-job dependencies. Keep these suites and their assertions in a separate
+opt-in extended workflow unless the user explicitly requests required execution.
+Keep compact critical regressions in normal lanes. Inspect existing lane
+classification and CI dependencies, assess runtime using permitted validation and
+actual CI timings, and optimize excessive cost rather than raising timeouts or
+moving it to another required job. Report unmeasured impact; a fast local
+`test:all` does not establish the runtime of separate CI jobs. This instruction is
+included in every new and resumed coding invocation.
 
 The AI inspects failures, fixes code and reruns `pnpm test:all`, preserving the
 repository's local test budget. It reuses unchanged passing results on resume.

@@ -57,10 +57,12 @@ python3 -m unittest discover -s coding-runner/tests -v
 python3 -m unittest discover -s codex-review/tests -v
 ```
 
-For application work, the coding AI follows the target repository's automatic CI
-test selection and setup. It runs only `pnpm test:all` plus required automatic CI
-checks that command omits. No focused tests or other extra runs are allowed, even
-while debugging. Unchanged passing results can be reused on resume. See the coding
+For application work, the coding AI uses the target repository's CI environment
+setup and runs only the complete `pnpm test:all` locally. Separate automatic CI
+checks run in CI. Slow extended suites stay in an opt-in workflow, outside required
+PR, push and deployment gates, with compact critical regressions in normal lanes.
+No focused tests or other extra local runs are allowed, even while debugging.
+Unchanged passing results can be reused on resume. See the coding
 runner guide for the full validation policy and how to rebuild images after changing
 the runner.
 

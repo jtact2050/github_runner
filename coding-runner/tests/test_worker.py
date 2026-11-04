@@ -113,6 +113,55 @@ class WorkerTests(unittest.TestCase):
         with patch.object(self.worker, 'snapshot', return_value=('approved', [], [], {})):
             self.assertFalse(self.worker.merge_if_approved(self.api.pull))
 
+    def test_stale_pr_waits_then_resumes_review_without_coding_or_merging_old_head(self):
+        import time
+        self.worker.save(phase='waiting_review', review_started=time.time())
+        def git(*args, **kwargs):
+            if args == ('rev-parse', 'HEAD'):
+                return SimpleNamespace(stdout='published\n')
+            self.assertEqual(args, ('ls-remote', '--exit-code', 'origin', 'refs/heads/codex/issue-1'))
+            self.assertTrue(kwargs['auth'])
+            return SimpleNamespace(stdout='published\trefs/heads/codex/issue-1\n')
+        def sleep(_):
+            self.assertEqual(self.worker.state['phase'], 'waiting_pr_sync')
+            snapshot.assert_not_called()
+            work.assert_not_called()
+            merge.assert_not_called()
+            self.api.pull['head']['sha'] = 'published'
+        with patch.object(self.worker, 'discover_pr', return_value=self.api.pull), \
+                patch.object(self.worker, 'setup_repo'), \
+                patch.object(self.worker, 'git', side_effect=git), \
+                patch.object(self.worker, 'needs_base_integration', return_value=False), \
+                patch.object(self.worker, 'snapshot', side_effect=JobError('review resumed')) as snapshot, \
+                patch.object(self.worker, 'work') as work, \
+                patch.object(self.worker, 'merge_if_approved') as merge, \
+                patch('worker.time.sleep', side_effect=sleep) as wait:
+            with self.assertRaisesRegex(JobError, 'review resumed'):
+                self.worker.run()
+        wait.assert_called_once_with(self.worker.poll)
+        self.assertEqual(snapshot.call_args.args[0]['head']['sha'], 'published')
+        self.assertEqual(self.worker.state['phase'], 'waiting_review')
+        self.assertNotIn('pr_sync_started', self.worker.state)
+        self.assertFalse(any(c[0].endswith('/merge') for c in self.api.calls))
+
+    def test_real_remote_divergence_is_not_treated_as_pr_lag(self):
+        for remote in ('external\trefs/heads/codex/issue-1\n', '',
+                       'published\trefs/heads/another-branch\n'):
+            with self.subTest(remote=remote), patch.object(self.worker, 'git', side_effect=[
+                    SimpleNamespace(stdout='published\n'), SimpleNamespace(stdout=remote)]):
+                with self.assertRaisesRegex(JobError, 'changed outside this worker'):
+                    self.worker.pr_head_is_current(self.api.pull)
+        self.assertNotIn('pr_sync_started', self.worker.state)
+
+    def test_pr_sync_wait_has_a_durable_timeout(self):
+        self.worker.save(pr_sync_started=1)
+        with patch.object(self.worker, 'git', side_effect=[SimpleNamespace(stdout='published'),
+                SimpleNamespace(stdout='published\trefs/heads/codex/issue-1')]), \
+                patch('worker.time.time', return_value=self.worker.review_timeout + 2):
+            with self.assertRaisesRegex(JobError, 'metadata did not catch up'):
+                self.worker.pr_head_is_current(self.api.pull)
+        self.assertEqual(self.worker.state['pr_sync_started'], 1)
+
     def test_issue_not_closed_if_pr_not_merged(self):
         with self.assertRaises(JobError):
             self.worker.finish(self.api.pull)

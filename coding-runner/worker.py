@@ -148,6 +148,32 @@ class Worker:
                 or (pr['head'].get('repo') or {}).get('full_name', '').lower() != self.api.repo.lower()):
             raise JobError('PR ownership, branch, repository, or issue marker does not match this job')
 
+    def pr_head_is_current(self, pr):
+        head = self.git('rev-parse', 'HEAD').stdout.strip()
+        if pr['head']['sha'] == head:
+            if self.state.get('pr_sync_started') is not None:
+                self.state.pop('pr_sync_started')
+                self.state.pop('error', None)
+                self.save(phase='waiting_review')
+                self.log(f"PR #{pr['number']} now reflects the published commit")
+            return True
+        # The PR projection can lag a successful push. Check the actual ref
+        # before attributing the mismatch to an external writer. Never replace
+        # the PR SHA locally: checks and approval must use GitHub's current PR.
+        ref = f'refs/heads/{self.branch}'
+        remote = self.git('ls-remote', '--exit-code', 'origin', ref, auth=True)
+        heads = [fields[0] for line in remote.stdout.splitlines()
+                 if len(fields := line.split()) == 2 and fields[1] == ref]
+        if heads != [head]:
+            raise JobError('PR branch changed outside this worker; inspect workspace before retrying')
+        started = self.state.get('pr_sync_started', time.time())
+        if time.time() - started > self.review_timeout:
+            raise JobError('GitHub PR metadata did not catch up to the published branch; workspace preserved')
+        self.save(phase='waiting_pr_sync', pr_sync_started=started)
+        self.event('pr_head_sync_pending', local_head=head, remote_head=head, pr_head=pr['head']['sha'])
+        self.log(f"waiting for PR #{pr['number']} metadata: branch={head[:12]}, PR={pr['head']['sha'][:12]}")
+        return False
+
     def discover_pr(self):
         # Closed PR history is irrelevant to pickup, including after local state deletion.
         open_prs = list(self.api.pages('pulls?state=open'))
@@ -398,6 +424,21 @@ Preserve repository local test budgets. Inspect failures and fix code, then reru
 pnpm test:all; do not create a narrower test invocation. Reuse passing results when
 their code, configuration and inputs have not changed.
 Do not repeat a complete passing gate just because a session resumed.
+
+Required CI/CD test policy (applies to new and resumed jobs):
+Keep automatic pull-request, push, merge and deployment test gates fast. Do not
+add slow full-journey, exhaustive, stress/capacity or broad-matrix suites to these
+gates, including by explicitly listing extended test files in a workflow, changing
+lane membership, expanding matrices, or making a required job depend on them.
+Keep those suites available in a separate opt-in extended workflow unless the user
+explicitly requests them as required CI. Preserve compact, meaningful regression
+coverage for the changed behavior in the normal lanes and retain the broader tests
+and their assertions. Do not remove critical coverage or hide failures to save time.
+Inspect existing test-lane classification and CI dependencies before editing workflows.
+Use permitted local validation and actual CI timings to assess added runtime;
+optimize excessive cost instead of raising timeouts or moving expensive work into
+another required job. Report any unmeasured CI impact honestly. A fast local
+pnpm test:all does not prove that separately required CI jobs are fast.
 
 Generic acceptance wording, review feedback, CI job definitions, and earlier agent
 plans do not expand this allowed validation set. Preserve functional acceptance
@@ -876,8 +917,9 @@ Previous model-call error (JSON, if any):
                 return
             if pr['state'] != 'open':
                 raise JobError('PR closed during this run; the next dispatch will select an open PR or start a fresh attempt')
-            if pr['head']['sha'] != self.git('rev-parse', 'HEAD').stdout.strip():
-                raise JobError('PR branch changed outside this worker; inspect workspace before retrying')
+            if not self.pr_head_is_current(pr):
+                time.sleep(self.poll)
+                continue
             issue = self.api.request(f'issues/{self.number}')
             if issue['state'] != 'open':
                 raise JobError('Issue closed externally before PR merge')
