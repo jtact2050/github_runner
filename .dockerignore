@@ -1,0 +1,12 @@
+*
+!Dockerfile.runner
+!Dockerfile.codex-review
+!Dockerfile.codex-coding
+!codex-review/
+!codex-review/**
+!coding-runner/
+!coding-runner/**
+coding-runner/tests
+codex-review/tests
+**/__pycache__
+credentials/

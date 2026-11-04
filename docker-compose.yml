@@ -1,0 +1,96 @@
+# Three GitHub Actions runners using the official GitHub image.
+# Each runner executes one job at a time. All share Docker Desktop's daemon.
+# IMPORTANT: docker.sock grants workflows extensive control of Docker Desktop.
+
+x-runner-env: &runner-env
+  GITHUB_URL: ${GITHUB_URL:?Set GITHUB_URL in .env}
+  RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN in .env}
+  RUNNER_ALLOW_RUNASROOT: "1"
+
+x-runner-common: &runner-common
+  build:
+    context: .
+    dockerfile: Dockerfile.runner
+  image: oaxon-actions-runner:local
+  #image: ghcr.io/actions/actions-runner:latest
+  restart: unless-stopped
+  # Running as root simplifies Docker socket permissions on Docker Desktop.
+  # Use ONLY for workflows and repository code you trust.
+  user: "0:0"
+  # Fix PostgreSQL localhost connectivity
+  network_mode: host
+  entrypoint: ["/bin/bash", "-euc"]
+  command:
+    - |
+      cd /home/runner
+
+      # Restore registration and environment files from persistent state.
+      for file in .runner .credentials .credentials_rsaparams .env .path; do
+        if [ -f "/runner-state/$$file" ]; then
+          rm -f "$$file"
+          ln -s "/runner-state/$$file" "$$file"
+        fi
+      done
+
+      # Registration token is needed only for first registration or recovery.
+      if [ ! -f .runner ]; then
+        ./config.sh \
+          --url "$$GITHUB_URL" \
+          --token "$$RUNNER_TOKEN" \
+          --name "$$RUNNER_NAME" \
+          --labels "mac-docker" \
+          --work "_work" \
+          --unattended
+
+        # Keep runner identity across container recreation/updates.
+        for file in .runner .credentials .credentials_rsaparams .env .path; do
+          if [ -f "$$file" ] && [ ! -L "$$file" ]; then
+            mv "$$file" "/runner-state/$$file"
+            ln -s "/runner-state/$$file" "$$file"
+          fi
+        done
+      fi
+
+      exec ./run.sh
+
+services:
+  runner-1:
+    <<: *runner-common
+    container_name: github-runner-1
+    environment:
+      <<: *runner-env
+      RUNNER_NAME: mac-mini-runner-1
+    volumes:
+      - runner-1-state:/runner-state
+      - runner-1-work:/home/runner/_work
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  runner-2:
+    <<: *runner-common
+    container_name: github-runner-2
+    environment:
+      <<: *runner-env
+      RUNNER_NAME: mac-mini-runner-2
+    volumes:
+      - runner-2-state:/runner-state
+      - runner-2-work:/home/runner/_work
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  runner-3:
+    <<: *runner-common
+    container_name: github-runner-3
+    environment:
+      <<: *runner-env
+      RUNNER_NAME: mac-mini-runner-3
+    volumes:
+      - runner-3-state:/runner-state
+      - runner-3-work:/home/runner/_work
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  runner-1-state:
+  runner-1-work:
+  runner-2-state:
+  runner-2-work:
+  runner-3-state:
+  runner-3-work:

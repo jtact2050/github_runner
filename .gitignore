@@ -1,0 +1,55 @@
+# Local configuration and credentials
+.env
+.env.*
+*.env
+!.env.example
+!*.env.example
+credentials/
+.codex/
+.aws/
+/.runner
+/.credentials*
+/auth.json
+*.pem
+*.key
+
+# Private job workspaces, conversations, logs and runtime state
+.coding-state/
+/_work/
+/runner-state/
+*.log
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Separate application checkouts are not part of this runner repository
+/oaxontax/
+/oaxontax-ai-review-design/
+/workspaces/
+
+# Dependencies, interpreter caches and test output
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+
+# OS/editor files and local backups
+.DS_Store
+._*
+Thumbs.db
+*.swp
+*.swo
+*~
+*.before-*
+* copy.yml

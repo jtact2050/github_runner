@@ -1,0 +1,39 @@
+name: Codex PR review
+on:
+  workflow_run:
+    workflows: [Verify]
+    types: [completed]
+  # These handle a draft becoming ready or an explicit re-review after CI.
+  # The controller still requires verification to have passed before Codex runs.
+  pull_request_target:
+    types: [ready_for_review, review_requested]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review again
+        type: number
+        required: true
+
+# The trusted controller uses the runner's saved jacktian8888 login.
+permissions: {}
+
+concurrency:
+  group: codex-review-${{ github.repository }}-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.draft == false)
+    # The dedicated runner has only this custom label, not the default labels.
+    runs-on: [codex-review]
+    timeout-minutes: 30
+    steps:
+      # No checkout, dependency install, or execution of code from the PR.
+      - name: Review verified PR commit with Codex
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          REVIEW_FORCE: ${{ github.event_name == 'workflow_dispatch' || github.event.action == 'review_requested' }}
+        run: python3 /opt/codex-review/review.py

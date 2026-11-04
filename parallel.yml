@@ -1,0 +1,16 @@
+name: Test Three Docker Runners
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: [self-hosted, mac-docker]
+    strategy:
+      max-parallel: 3
+      matrix:
+        task: [1, 2, 3]
+    steps:
+      - name: Identify runner
+        run: |
+          echo "Running task ${{ matrix.task }} on $RUNNER_NAME"
+          uname -a
+          docker version

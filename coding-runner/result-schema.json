@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "tests", "test_results", "next_steps", "blocker"],
+  "properties": {
+    "status": {"type": "string", "enum": ["completed", "in_progress", "blocked"]},
+    "summary": {"type": "string"},
+    "tests": {"type": "array", "items": {"type": "string"}},
+    "test_results": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["command", "exit_code", "summary"],
+        "properties": {
+          "command": {"type": "string"},
+          "exit_code": {"type": ["integer", "null"]},
+          "summary": {"type": "string"}
+        }
+      }
+    },
+    "next_steps": {"type": "array", "items": {"type": "string"}},
+    "blocker": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["reason", "owner", "unblock_condition", "evidence"],
+          "properties": {
+            "reason": {"type": "string"},
+            "owner": {"type": "string"},
+            "unblock_condition": {"type": "string"},
+            "evidence": {"type": "string"}
+          }
+        }
+      ]
+    }
+  }
+}
