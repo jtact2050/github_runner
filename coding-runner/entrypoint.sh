@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ $(id -u) == 0 ]]; then
+  # Bind-mounted private job files must have the same owner on Linux and host.
+  if [[ -n ${CODING_RUNNER_UID:-} && ${CODING_RUNNER_UID} != $(id -u runner) ]]; then
+    [[ $CODING_RUNNER_UID =~ ^[0-9]+$ && $CODING_RUNNER_UID != 0 && $CODING_RUNNER_UID != $(id -u codex) ]] || {
+      echo 'CODING_RUNNER_UID must be a non-root UID distinct from codex' >&2
+      exit 1
+    }
+    usermod -o -u "$CODING_RUNNER_UID" runner
+  fi
   install -d -m 700 -o runner -g runner /job-state /home/runner/.config /home/runner/.config/gh
+  # Workspaces inside job state belong to the separate model UID.
+  find /job-state -type d -name workspace -prune -o -exec chown -h runner:runner {} +
   install -d -m 2770 -o codex -g runner /workspace
   # The issue's host workspace retains its conversation and SQLite index.
   # Credentials remain links to the shared login; they are never copied into this folder.

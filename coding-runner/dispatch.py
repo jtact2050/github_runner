@@ -296,7 +296,12 @@ class Dispatcher:
         else:
             self.prepare_resume(number)
             workspace = self.prepare_workspace(number)
+            security_options = []
+            if self.args.apparmor_profile:
+                security_options = ['--security-opt', f'apparmor={self.args.apparmor_profile}']
             args = ['run', '--detach', '--name', name, '--init', '--restart', 'no',
+                    *security_options,
+                    '--env', f'CODING_RUNNER_UID={os.getuid()}',
                     '--network', 'host',
                     '--label', f'codex.repo={self.api.repo}', '--label', f'codex.issue={number}',
                     '--label', f'codex.milestone={milestone}',
@@ -541,6 +546,18 @@ def positive(value):
     return number
 
 
+def configured_apparmor_profile():
+    if 'CODEX_APPARMOR_PROFILE' in os.environ:
+        return os.environ['CODEX_APPARMOR_PROFILE'] or None
+    path = ROOT / '.env'
+    if path.is_file():
+        for line in reversed(path.read_text().splitlines()):
+            key, separator, value = line.strip().partition('=')
+            if separator and key == 'CODEX_APPARMOR_PROFILE':
+                return value.strip().strip('\"\'') or None
+    return None
+
+
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', default=default_repo())
@@ -557,6 +574,8 @@ def arguments(argv=None):
     parser.add_argument('--effort', choices=['low', 'medium', 'high', 'xhigh'], default='high')
     parser.add_argument('--cpus', type=positive, default=2)
     parser.add_argument('--memory', default='8g')
+    parser.add_argument('--apparmor-profile', default=configured_apparmor_profile(),
+                        help='installed Docker AppArmor profile (or CODEX_APPARMOR_PROFILE in .env)')
     parser.add_argument('--dry-run', action='store_true', help='read GitHub and show next jobs, with no Docker/GitHub changes')
     parser.add_argument('--once', action='store_true', help='one dispatch cycle; launched containers keep working')
     parser.add_argument('--drain', action='store_true',
@@ -626,7 +645,21 @@ def main():
         dispatcher.tick()
         return
     for required in ('credentials/codex/auth.json', 'credentials/gh-coding/hosts.yml'):
-        if not (ROOT / required).is_file():
+        path = ROOT / required
+        try:
+            present = path.is_file()
+        except PermissionError:
+            # Startup intentionally makes the shared login private to its
+            # container UID. Check through Docker without reading the token or
+            # changing the host directory's permissions.
+            if docker('image', 'inspect', IMAGE, check=False).returncode:
+                raise JobError('Coding image unavailable; run ./run-issues.sh --build-only first') from None
+            present = docker(
+                'run', '--rm', '--network', 'none', '--read-only',
+                '--mount', f'type=bind,source={path.parent},target=/credentials,readonly',
+                '--entrypoint', 'test', IMAGE, '-f', f'/credentials/{path.name}',
+                check=False).returncode == 0
+        if not present:
             raise JobError(f'Missing {required}; complete the one-time login first')
     if docker('image', 'inspect', IMAGE, check=False).returncode:
         raise JobError('Coding image unavailable; run ./run-issues.sh --build-only first')

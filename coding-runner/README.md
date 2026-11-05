@@ -30,6 +30,35 @@ review gates still apply.
 
 ## Accounts and parallel execution
 
+### Ubuntu AppArmor setup
+
+If Codex reports `bwrap: Failed to make / slave: Permission denied`, Docker's
+default AppArmor profile is blocking its nested sandbox mounts. On Ubuntu with
+AppArmor 4, install the dedicated enforced profile from the repository root:
+
+```bash
+sudo install -m 644 codex-review/apparmor.profile /etc/apparmor.d/codex-runner
+sudo apparmor_parser -r /etc/apparmor.d/codex-runner
+```
+
+Set `CODEX_APPARMOR_PROFILE=codex-runner` in `.env`, or pass
+`--apparmor-profile codex-runner` to the dispatcher. Restart the dispatcher after
+draining existing workers; the setting applies to new containers. Docker's
+existing seccomp filter, capability limits and Codex sandbox stay enabled. The
+profile retains the Moby default proc/sys restrictions while allowing user
+namespaces and mounts needed by bubblewrap. No host-wide sysctl change is needed.
+Do not substitute an unconfined profile. Confirm the sandbox can launch before
+retrying jobs:
+
+```bash
+docker run --rm --network none --user 1002:1002 \
+  --security-opt seccomp="$PWD/codex-review/seccomp.json" \
+  --security-opt apparmor=codex-runner --entrypoint codex \
+  codex-issue-worker:local sandbox -- /bin/sh -c 'pwd'
+```
+
+### Shared accounts
+
 - Coding GitHub identity: **jtact2050** (`credentials/gh-coding/`). Both the host
   dispatcher and each worker verify this login through GitHub before working.
 - Reviewing GitHub identity: **jacktian8888** (`credentials/gh-review/`). Keep the

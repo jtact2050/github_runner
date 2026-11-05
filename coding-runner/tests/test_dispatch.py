@@ -332,6 +332,24 @@ class DispatchTests(unittest.TestCase):
             self.assertFalse(any(isinstance(a, str) and a.endswith('target=/home/codex/.codex') for a in call))
             self.assertTrue(any(isinstance(a, str) and a.endswith('target=/home/codex/.codex-auth') for a in call))
 
+    def test_apparmor_profile_is_added_without_removing_seccomp(self):
+        self.args.apparmor_profile = 'codex-runner'
+        with patch('dispatch.inspect_container', return_value=None), \
+                patch('dispatch.docker', return_value=SimpleNamespace(stdout='container-id')) as launch, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.queue.launch(1, 1)
+        args = launch.call_args.args
+        self.assertIn('apparmor=codex-runner', args)
+        self.assertTrue(any(str(arg).startswith('seccomp=') for arg in args))
+        self.assertNotIn('--privileged', args)
+        self.assertNotIn('--cap-add', args)
+
+    def test_apparmor_configuration_from_dotenv_and_cli_override(self):
+        (Path(self.temp.name) / '.env').write_text('CODEX_APPARMOR_PROFILE=codex-runner\n')
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(arguments([]).apparmor_profile, 'codex-runner')
+            self.assertEqual(arguments(['--apparmor-profile', 'custom']).apparmor_profile, 'custom')
+
     def mount_failure(self):
         return JobError('Docker run failed: invalid mount config for type "bind": stat '
                         + str(self.queue.job_dir(1)) + ': operation not permitted')
