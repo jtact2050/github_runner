@@ -35,7 +35,8 @@ class CLIProgress:
 
     def process_started(self, pid):
         self.started = self.last_output = self.last_heartbeat = time.monotonic()
-        self.data.update(status='running', pid=pid, started_at=stamp())
+        self.data.update(status='running', pid=pid, started_at=stamp(),
+                         last_activity='CLI process started; waiting for first event')
         self.write(f'CLI started: pid={pid}, timeout={self.worker.cli_timeout}s', console=True)
         self.snapshot()
 

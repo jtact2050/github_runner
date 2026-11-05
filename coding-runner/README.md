@@ -21,7 +21,8 @@ context-based implementation decisions, record material assumptions, and continu
 without asking questions or waiting for confirmation. Commands must use explicit,
 non-interactive options without watch mode or login/setup wizards. The worker sets
 `CI=1`, disables Git credential prompts, and uses plain-output pagers; Codex runs
-with `-a never`, and its prompt pipe closes after delivery. These settings do not
+with `-a never`, and stdin reads the complete saved prompt file through EOF.
+Prompt delivery does not depend on pipe capacity or startup speed. These settings do not
 make every third-party command non-interactive, so the model must stop and replace
 commands that still request input. Actual missing external dependencies are recorded
 as structured blockers after independent work is finished; production approval and

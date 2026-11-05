@@ -559,11 +559,14 @@ Previous model-call error (JSON, if any):
         self.save(codex_pending_events=str(output_path.relative_to(self.state_dir)))
         self.event('codex_session_resuming' if session else 'codex_session_starting',
                    session_id=session['id'] if session else None)
-        # Direct files preserve partial output on timeout, SIGTERM, or controller death.
-        with log_path.open('wb') as log, output_path.open('wb') as output, output_path.open('rb') as events:
+        # Give stdin the complete saved prompt, so a slow startup or a prompt
+        # larger than a pipe buffer cannot strand input across polling timeouts.
+        # Direct files also preserve output on timeout, SIGTERM or controller death.
+        with (directory / 'prompt.txt').open('rb') as prompt_input, \
+                log_path.open('wb') as log, output_path.open('wb') as output, output_path.open('rb') as events:
             os.chmod(log_path, 0o600)
             os.chmod(output_path, 0o600)
-            process = subprocess.Popen(command, cwd=self.root, env=clean, stdin=subprocess.PIPE,
+            process = subprocess.Popen(command, cwd=self.root, env=clean, stdin=prompt_input,
                                        stdout=output, stderr=log, start_new_session=True)
             previous = signal.getsignal(signal.SIGTERM)
             def cancel(signum, frame):
@@ -574,19 +577,16 @@ Previous model-call error (JSON, if any):
             deadline = time.monotonic() + self.cli_timeout
             try:
                 progress.process_started(process.pid)
-                pending_input = prompt.encode()
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(command, self.cli_timeout)
                     try:
-                        process.communicate(pending_input, timeout=min(1, remaining))
+                        process.communicate(timeout=min(1, remaining))
                         break
                     except subprocess.TimeoutExpired:
                         reader.consume(deadline=deadline)
                         progress.poll(exit_code=process.poll())
-                    finally:
-                        pending_input = None
             except BaseException:
                 if process.poll() is None:
                     try:

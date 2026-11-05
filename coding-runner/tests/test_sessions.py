@@ -51,7 +51,7 @@ class SessionTests(unittest.TestCase):
                                 'PAGER=cat', 'GIT_PAGER=cat'):
                     self.assertIn(setting, command)
                 # The subprocess can only return a result after reading EOF from
-                # the actual prompt pipe; no interactive stdin remains open.
+                # the complete prompt input; no interactive stdin remains open.
                 prompt = (self.worker.root / 'received-prompt.txt').read_text()
                 self.assertIn('No user is available to answer.', prompt)
                 self.assertIn('Do not ask the user questions', prompt)
@@ -91,6 +91,24 @@ class SessionTests(unittest.TestCase):
             self.assertIn('CODEX_SQLITE_HOME=' + str(self.directory / '.codex-runtime'), command)
             self.assertLess(command.index('--sandbox'), command.index('resume'))
             self.assertGreater(command.index('--output-schema'), command.index('resume'))
+
+    def test_large_prompt_reaches_eof_after_slow_child_startup(self):
+        # Linux pipes fill before a slow CLI reads stdin. The controller must
+        # keep the entire prompt available across its one-second polling ticks.
+        self.worker.cli_timeout = 5
+        self.api.issue['body'] = 'CI diagnostic line\n' * 12000
+        popen = subprocess.Popen
+        output = event_stream(json.dumps(model_result()))
+        script = ('import sys,time; from pathlib import Path; time.sleep(1.3); '
+                  'Path("received-prompt.txt").write_bytes(sys.stdin.buffer.read()); '
+                  f'print({output!r}, end="")')
+        def start(command, **kwargs):
+            return popen([sys.executable, '-c', script], **kwargs)
+        with patch('worker.subprocess.Popen', side_effect=start):
+            self.worker.run_codex(self.api.issue, 'Fix CI', [])
+        prompt = next(self.worker.state_dir.glob('runs/*/round-*/prompt.txt')).read_bytes()
+        self.assertGreater(len(prompt), 200000)
+        self.assertEqual((self.worker.root / 'received-prompt.txt').read_bytes(), prompt)
 
     def test_crash_before_session_save_recovers_id_from_pending_event_log(self):
         path = self.worker.state_dir / 'runs/attempt/stdout.log'
