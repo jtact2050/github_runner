@@ -72,6 +72,7 @@ def current_review_checks(checks, runs, number, head):
 
 def failed_checks(checks, statuses):
     result = [{'name': c['name'], 'url': c.get('html_url'), 'conclusion': c.get('conclusion')}
+              | ({'check_run_id': c['id']} if c.get('id') else {})
               for c in checks if c['status'] == 'completed' and c.get('conclusion') not in ('success', 'neutral', 'skipped')]
     result += [{'name': c['context'], 'url': c.get('target_url'), 'conclusion': c['state']}
                for c in statuses if c['state'] in ('failure', 'error')]

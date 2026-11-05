@@ -556,7 +556,7 @@ class WorkerTests(unittest.TestCase):
         retry.assert_called_once()
 
     def test_interrupted_worker_recovers_last_result_and_original_review_feedback(self):
-        feedback = [{'key': 'ci:sha', 'checks': ['test failed']}]
+        feedback = [{'key': 'review:1', 'body': 'Fix test failure'}]
         self.worker.max_rounds = 1
         unfinished = model_result('in_progress', next_steps=['Fix test failure'])
         with patch.object(self.worker, 'integrate_base'), \
@@ -569,7 +569,7 @@ class WorkerTests(unittest.TestCase):
             resumed.work(self.api.issue, 'Implement', [])
         self.assertEqual(run.call_args.args[2], feedback)
         self.assertIn('Continue', run.call_args.args[1])
-        self.assertEqual(resumed.state['handled'], ['ci:sha'])
+        self.assertEqual(resumed.state['handled'], ['review:1'])
 
     def test_old_worker_result_is_included_in_first_upgraded_call(self):
         previous = {'status': 'blocked', 'summary': 'Incomplete source correction', 'tests': []}

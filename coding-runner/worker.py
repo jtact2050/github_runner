@@ -730,10 +730,20 @@ Previous model-call error (JSON, if any):
         if continuation.get('issue_digest') == issue_digest(issue) and not feedback:
             reason = continuation['reason']
             feedback = continuation['feedback']
+        elif not feedback:
+            # Changed issue text must not drop a pending CI repair on resume.
+            feedback = [item for item in continuation.get('feedback', [])
+                        if item.get('key', '').startswith('ci:')]
         if self.state.get('last_result_round', -1) < self.state['rounds']:
             previous = load_json(self.state_dir / f"result-{self.state['rounds']}.json")
             if previous:
                 self.save(last_result=previous, last_result_round=self.state['rounds'])
+        if any(item.get('key', '').startswith('ci:') for item in feedback):
+            feedback = self.wait_for_ci_diagnostics(reason, feedback)
+            if not feedback and self.ci_repair_is_obsolete():
+                self.state.pop('continuation', None)
+                self.save(phase='waiting_review')
+                return
         while True:
             if self.state['rounds'] >= self.max_rounds:
                 raise JobError(f'Maximum coding/revision rounds reached ({self.state["rounds"]}/{self.max_rounds}); raise --max-rounds to allow more coding')
@@ -815,25 +825,99 @@ Previous model-call error (JSON, if any):
 
     def ci_feedback(self, failures):
         result = []
-        for failure in failures[:5]:
+        for failure in failures:
             item = failure.copy()
             # Fetch private Actions logs as the controller, never give gh credentials to Codex.
             match = re.fullmatch(r'https://github\.com/' + re.escape(self.api.repo)
                                  + r'/actions/runs/[0-9]+/job/([0-9]+)(?:\?.*)?', item.get('url') or '')
             if match:
                 try:
-                    logs = subprocess.run(['gh', 'run', 'view', '--repo', self.api.repo,
-                                           '--job', match[1], '--log-failed'], env=self.api.env,
+                    # The job endpoint works independently of the workflow's other
+                    # jobs. `gh run view --log-failed` waits for the entire run.
+                    logs = subprocess.run(['gh', 'api',
+                                           f'repos/{self.api.repo}/actions/jobs/{match[1]}/logs'], env=self.api.env,
                                           capture_output=True, text=True, timeout=90)
                     self.event('ci_logs', job=match[1], exit_code=logs.returncode,
                                stdout=logs.stdout, stderr=logs.stderr)
-                    if logs.returncode == 0:
+                    if logs.returncode == 0 and logs.stdout.strip():
                         item['log_excerpt'] = logs.stdout[-30000:].replace(self.api.token, '[redacted]')
-                except subprocess.TimeoutExpired as error:
-                    self.event('ci_logs_timeout', job=match[1], stdout=error.stdout, stderr=error.stderr)
-                    item['log_excerpt'] = 'Log retrieval timed out; reproduce locally.'
+                    else:
+                        item['diagnostics_error'] = (logs.stderr.strip() or 'Job logs are empty')[-2000:]
+                except (subprocess.TimeoutExpired, OSError) as error:
+                    self.event('ci_logs_failed', job=match[1], error=str(error))
+                    item['diagnostics_error'] = str(error)
+            check_id = item.get('check_run_id')
+            if check_id and not item.get('log_excerpt'):
+                try:
+                    annotations = list(self.api.pages(f'check-runs/{check_id}/annotations'))
+                    messages = [f"{a.get('path', '')}:{a.get('start_line', '')}: {a['message']}"
+                                for a in annotations if a.get('message') and a.get('annotation_level') == 'failure']
+                    if messages:
+                        item['log_excerpt'] = '\n'.join(messages)[:30000].replace(self.api.token, '[redacted]')
+                except JobError as error:
+                    self.event('ci_annotations_failed', check_run_id=check_id, error=str(error))
+                    item['diagnostics_error'] = str(error)
+            if match or check_id:
+                item['diagnostics_pending'] = not bool(item.get('log_excerpt'))
+            if item.get('diagnostics_error'):
+                item['diagnostics_error'] = item['diagnostics_error'].replace(self.api.token, '[redacted]')
             result.append(item)
         return result
+
+    def wait_for_ci_diagnostics(self, reason, feedback):
+        """Refresh CI before every repair, including saved/blocked continuations.
+
+        Missing logs are controller work, not a coding round. Keep polling the
+        current head so rerun jobs replace stale IDs and completed checks disappear.
+        """
+        saved = [item for item in feedback if not item.get('key', '').startswith('ci:')]
+        while True:
+            pr = self.pr()
+            self.verify_pr(pr)
+            if pr.get('merged') or pr['state'] != 'open':
+                raise JobError('PR closed while waiting for CI diagnostics; reconcile on resume')
+            current_issue = self.api.request(f'issues/{self.number}')
+            if current_issue['state'] != 'open':
+                raise JobError('Issue closed while waiting for CI diagnostics')
+            _, review_feedback, checks, status = self.snapshot(pr)
+            failures = failed_checks(checks, status.get('statuses', []))
+            failures = [f for f in failures if not (f['name'] == 'review' and f['conclusion'] == 'cancelled')]
+            diagnostics = self.ci_feedback(failures)
+            combined = {item['key']: item for item in [*saved, *review_feedback]}
+            refreshed = list(combined.values())
+            if diagnostics:
+                refreshed.append({'key': 'ci:' + pr['head']['sha'], 'checks': diagnostics})
+            pending = [item for item in diagnostics if item.get('diagnostics_pending')]
+            if not pending:
+                self.state.pop('ci_diagnostics_started', None)
+                self.state.pop('error', None)
+                self.save(continuation={'issue_digest': issue_digest(current_issue),
+                                        'reason': reason, 'feedback': refreshed})
+                return refreshed
+            started = self.state.get('ci_diagnostics_started', time.time())
+            message = 'Waiting for CI diagnostics: ' + ', '.join(item['name'] for item in pending)
+            self.save(phase='waiting_ci_diagnostics', ci_diagnostics_started=started,
+                      continuation={'issue_digest': issue_digest(current_issue),
+                                    'reason': reason, 'feedback': refreshed}, error=message)
+            self.event('ci_diagnostics_wait', checks=pending)
+            if time.time() - started > self.review_timeout:
+                raise JobError(message + '; controller wait timed out without spending a coding round')
+            self.log(message + '; coding round not started')
+            time.sleep(self.poll)
+
+    def ci_repair_is_obsolete(self):
+        """A passing rerun must not discard edits, changed scope or conflict work."""
+        result = self.state.get('last_result') or {}
+        if result.get('status') == 'in_progress' or result.get('next_steps'):
+            return False
+        issue = self.api.request(f'issues/{self.number}')
+        pr = self.pr()
+        if (issue_digest(issue) != self.state.get('issue_digest')
+                or pr.get('mergeable') is False or pr.get('mergeable_state') == 'dirty'
+                or self.needs_base_integration(pr)):
+            return False
+        return (not self.git('status', '--porcelain').stdout.strip()
+                and self.git('rev-parse', 'HEAD').stdout.strip() == self.state.get('last_head'))
 
     def finish(self, pr):
         self.verify_pr(pr)
@@ -903,7 +987,7 @@ Previous model-call error (JSON, if any):
         self.setup_repo()
         if not pr:
             self.work(issue, 'Implement the issue', [])
-        elif pr['draft'] or self.state.get('phase') == 'coding':
+        elif pr['draft'] or self.state.get('phase') in ('coding', 'waiting_ci_diagnostics'):
             self.work(issue, 'Resume interrupted implementation', [])
         elif self.state.get('pending_feedback'):
             self.save(handled=sorted(set(self.state['handled'] + self.state.pop('pending_feedback'))))
@@ -943,7 +1027,7 @@ Previous model-call error (JSON, if any):
                 key = 'ci:' + pr['head']['sha']
                 if key not in self.state['handled']:
                     reasons.append('Fix failing CI checks using their logs; validate locally only with pnpm test:all')
-                    feedback = [*feedback, {'key': key, 'checks': self.ci_feedback(failures)}]
+                    feedback = [*feedback, {'key': key, 'checks': failures}]
             if reasons:
                 self.work(issue, '; '.join(reasons), feedback)
                 continue

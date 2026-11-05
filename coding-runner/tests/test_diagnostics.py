@@ -150,7 +150,8 @@ class DiagnosticTests(unittest.TestCase):
 
     def test_pre_model_failure_has_round_context_and_traceback(self):
         self.api.request = lambda path: self.issue
-        with patch.object(self.worker, 'integrate_base', side_effect=JobError('fetch failed')):
+        with patch.object(self.worker, 'integrate_base', side_effect=JobError('fetch failed')), \
+                patch.object(self.worker, 'wait_for_ci_diagnostics', return_value=[{'key': 'ci:sha'}]):
             with self.assertRaises(JobError):
                 self.worker.work(self.issue, 'Resume after CI failure', [{'key': 'ci:sha'}])
         start = next(e for e in self.events() if e['event'] == 'round_started')

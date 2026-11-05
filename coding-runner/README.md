@@ -290,7 +290,15 @@ summaries and tool activity, not hidden model state.
    are reused on restart.
 4. On every review poll, check the PR's conflict status alongside review and CI
    results. Combine conflicts, new review feedback from jacktian8888, and failed
-   CI into one resumed revision run, with available private Actions log excerpts.
+   CI into one resumed revision run. Before every CI repair (including resumed
+   blocked work), the controller refreshes current-head checks and downloads
+   private logs directly from each failed job, with failure annotations as a
+   fallback. Other jobs in the workflow need not finish first. If diagnostics
+   are unavailable, it stays in `waiting_ci_diagnostics` and polls GitHub without
+   invoking Codex or consuming coding rounds. Rerun job IDs and newly completed
+   checks replace saved feedback. The diagnostic wait uses `--review-timeout`,
+   with its start time preserved across restarts; retrieval errors remain in
+   private logs and worker state.
    Clean upstream advances and unknown mergeability do not trigger revisions.
    Publish the validated head without integrating newer upstream commits, then
    recheck GitHub's conflict status for that head on the next poll.
