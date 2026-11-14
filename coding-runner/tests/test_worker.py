@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import JobError, load_json, save_json
-from worker import Worker, ModelRunError, issue_digest, validate_result
+from worker import Worker, ModelRunError, ModelCapacityError, issue_digest, validate_result
 from result_fixture import event_stream, model_result
 
 
@@ -593,6 +593,40 @@ class WorkerTests(unittest.TestCase):
         publish.assert_not_called()
         self.assertEqual(self.worker.state['last_result'], previous)
         self.assertNotIn('manual_retry_required', self.worker.state)
+
+    def test_capacity_retries_after_two_seconds_in_same_round(self):
+        with patch.object(self.worker, 'integrate_base'), \
+                patch.object(self.worker, 'run_codex', side_effect=[ModelCapacityError('Selected model is at capacity'), model_result()]) as run, \
+                patch('worker.time.sleep') as sleep, patch.object(self.worker, 'publish'):
+            self.worker.work(self.api.issue, 'Continue saved work', [])
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(2)
+        self.assertEqual(self.worker.state['rounds'], 1)
+        self.assertEqual(run.call_args_list[0], run.call_args_list[1])
+
+    def test_capacity_retry_stops_when_timeout_budget_is_used(self):
+        self.worker.cli_timeout = 1
+        with patch.object(self.worker, 'run_codex', side_effect=ModelCapacityError('Selected model is at capacity')) as run, \
+                patch('worker.time.sleep') as sleep, self.assertRaises(ModelCapacityError):
+            self.worker.run_with_capacity_retry(self.api.issue, 'Continue', [])
+        run.assert_called_once()
+        sleep.assert_not_called()
+        self.assertEqual(self.worker.cli_timeout, 1)
+
+    def test_nonzero_capacity_failure_is_classified_before_generic_exit(self):
+        import json
+        from result_fixture import SESSION_ID
+        events = [{'type': 'thread.started', 'thread_id': SESSION_ID},
+                  {'type': 'turn.failed', 'error': {'message': 'Selected model is at capacity. Please try a different model.'}}]
+        with patch('worker.subprocess.Popen') as popen:
+            def communicate(*args, **kwargs):
+                popen.call_args.kwargs['stdout'].write(('\n'.join(json.dumps(e) for e in events)+'\n').encode())
+            popen.return_value.communicate.side_effect = communicate
+            popen.return_value.returncode = 1
+            popen.return_value.pid = 12345
+            with self.assertRaises(ModelCapacityError):
+                self.worker.run_codex(self.api.issue, 'Continue', [])
+        self.assertEqual(self.worker.state['codex_session']['id'], SESSION_ID)
 
     def test_worker_migrates_legacy_manual_retry_state_without_resetting_session(self):
         self.worker.save(manual_retry_required=True, blocked_issue_digest=issue_digest(self.api.issue),

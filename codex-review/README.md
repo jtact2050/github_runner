@@ -68,6 +68,30 @@ Run these commands from `/Users/jokul/github-runner` (or your copy of this folde
 
 ## Operation
 
+### Ubuntu AppArmor
+
+On Ubuntu, Docker's default AppArmor profile can block Codex with
+`bwrap: Failed to make / slave: Permission denied`. Install the enforced profile:
+
+```sh
+sudo install -m 644 codex-review/apparmor.profile /etc/apparmor.d/codex-runner
+sudo apparmor_parser -r /etc/apparmor.d/codex-runner
+```
+
+Start or recreate the idle reviewer using both Compose files:
+
+```sh
+docker compose -f compose.codex-review.yml -f compose.codex-review.apparmor.yml up -d
+```
+
+Use both files for future `up` commands on Ubuntu so the profile stays applied.
+The override selects `CODEX_APPARMOR_PROFILE` from `.env`, defaulting to
+`codex-runner`, and retains the base seccomp filter. macOS uses only the base
+Compose file. Coding workers read the setting independently; configuring them
+does not update the separate review container.
+
+### Credentials and runtime
+
 CLI logins are stored in separate local folders beside the Compose file:
 
 ```text

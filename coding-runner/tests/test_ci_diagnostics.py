@@ -56,6 +56,48 @@ class CIDiagnosticsTests(unittest.TestCase):
             self.assertTrue(result[0]['diagnostics_pending'])
             self.assertNotIn('log_excerpt', result[0])
 
+    def test_cancelled_jobs_keep_available_logs(self):
+        cancelled = dict(self.check, conclusion='cancelled')
+        with patch('worker.subprocess.run', return_value=SimpleNamespace(
+                returncode=0, stdout='Cancellation received while running terraform', stderr='')):
+            result = self.worker.ci_feedback(failed_checks([cancelled], []))
+        self.assertFalse(result[0]['diagnostics_pending'])
+        self.assertIn('Cancellation received', result[0]['log_excerpt'])
+        self.assertNotIn('diagnostics_note', result[0])
+
+    def test_cancelled_jobs_without_logs_do_not_block_repair_or_allow_merge(self):
+        cancelled = dict(self.check, id=102, name='terraform (production)', conclusion='cancelled',
+                         html_url=self.check['html_url'].replace('/20', '/21'))
+        self.worker.save(phase='waiting_ci_diagnostics', ci_diagnostics_started=1,
+                         continuation={'issue_digest': issue_digest(self.api.issue),
+                                       'reason': 'Fix CI', 'feedback': self.feedback})
+        resumed = Worker(self.api, 1, state_dir=self.worker.state_dir)
+        logs = [SimpleNamespace(returncode=0, stdout='TS2322: incompatible worker result', stderr=''),
+                SimpleNamespace(returncode=1, stdout='', stderr='gh: HTTP 404')]
+        with patch.object(resumed, 'snapshot', return_value=('waiting', [], [self.check, cancelled], {})), \
+                patch('worker.subprocess.run', side_effect=logs), \
+                patch.object(self.api, 'pages', return_value=[]), \
+                patch('worker.time.sleep') as sleep, \
+                patch.object(resumed, 'integrate_base'), \
+                patch.object(resumed, 'run_codex', return_value=model_result()) as run, \
+                patch.object(resumed, 'publish') as publish:
+            resumed.work(self.api.issue, 'Resume interrupted implementation', [])
+        sleep.assert_not_called()
+        run.assert_called_once()
+        publish.assert_called_once()
+        checks = run.call_args.args[2][0]['checks']
+        self.assertIn('TS2322', checks[0]['log_excerpt'])
+        self.assertEqual(checks[1]['conclusion'], 'cancelled')
+        self.assertEqual(checks[1]['diagnostics_error'], 'gh: HTTP 404')
+        self.assertFalse(checks[1]['diagnostics_pending'])
+        self.assertNotIn('log_excerpt', checks[1])
+        self.assertIn('not a passing check', checks[1]['diagnostics_note'])
+        self.assertNotIn('ci_diagnostics_started', resumed.state)
+        self.assertEqual(resumed.state['rounds'], 1)
+        with patch.object(resumed, 'snapshot', return_value=('approved', [], [cancelled], {})):
+            self.assertFalse(resumed.merge_if_approved(self.api.pull))
+        self.assertFalse(any(c[0].endswith('/merge') for c in self.api.calls))
+
     def test_wait_refreshes_rerun_job_then_coder_receives_error_once(self):
         newer = dict(self.check, id=102, html_url=self.check['html_url'].replace('/20', '/21'))
         logs = [SimpleNamespace(returncode=1, stdout='', stderr='Logs not ready'),

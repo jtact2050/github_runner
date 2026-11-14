@@ -1,0 +1,6 @@
+# Ubuntu: use with -f compose.codex-review.yml -f compose.codex-review.apparmor.yml.
+# Load codex-review/apparmor.profile on the Docker host before starting.
+services:
+  codex-review:
+    security_opt:
+      - apparmor=${CODEX_APPARMOR_PROFILE:-codex-runner}

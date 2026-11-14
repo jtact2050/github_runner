@@ -264,7 +264,10 @@ Previous results and original review/CI feedback remain available on retry.
 
 Every CLI run writes these private files while it is running:
 
-- `jobs/N/progress.log`: append-only readable history across invocations, including
+- `jobs/N/progress.log`: relative symlink to the current or latest run's
+  `runs/<run-id>/round-*/progress.log`. The link switches atomically for each new
+  invocation; use `tail -F` to follow across retries.
+- `jobs/N/progress-history.log`: append-only readable history across invocations, including
   emitted messages, plan updates, commands, command exit codes and output, file
   changes, stderr excerpts and heartbeats. The same run's history also appears
   in its own `runs/<run-id>/round-*/progress.log`.
@@ -288,6 +291,13 @@ file in another terminal. For issue #16 in the default repository:
 tail -F .coding-state/238b90463879/jobs/16/progress.log
 cat .coding-state/238b90463879/jobs/16/progress.json
 ```
+
+When the provider reports `Selected model is at capacity`, the worker waits two
+seconds and retries the same model with the saved session and workspace. Capacity
+retries share the current round and its original CLI timeout budget; each retry
+keeps separate diagnostic files. Other errors follow the normal retry policy.
+Existing combined issue logs are preserved as `progress-history.log` when the
+current-run symlink is first created.
 
 A heartbeat shows observed activity, not a guarantee of correctness. A long time
 without output may mean a long-running command or model response. A stale
@@ -324,11 +334,15 @@ summaries and tool activity, not hidden model state.
    blocked work), the controller refreshes current-head checks and downloads
    private logs directly from each failed job, with failure annotations as a
    fallback. Other jobs in the workflow need not finish first. If diagnostics
-   are unavailable, it stays in `waiting_ci_diagnostics` and polls GitHub without
+   are unavailable for a failed job, it stays in `waiting_ci_diagnostics` and polls GitHub without
    invoking Codex or consuming coding rounds. Rerun job IDs and newly completed
    checks replace saved feedback. The diagnostic wait uses `--review-timeout`,
    with its start time preserved across restarts; retrieval errors remain in
    private logs and worker state.
+   Cancelled jobs may have no logs or annotations because they never started.
+   Their cancellation and retrieval errors remain in feedback, but missing logs
+   do not delay repairs to other checks. Cancellation still prevents merging;
+   subsequent CI must pass normally.
    Clean upstream advances and unknown mergeability do not trigger revisions.
    Publish the validated head without integrating newer upstream commits, then
    recheck GitHub's conflict status for that head on the next poll.

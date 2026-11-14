@@ -1,8 +1,29 @@
 """Observable CLI activity, without treating silence or process liveness as success."""
 import json
+import os
 import time
+import uuid
 
 from common import save_json, stamp
+
+
+def link_progress_log(state_dir, directory):
+    """Point at the latest run without losing the old combined issue log."""
+    target = (directory / 'progress.log').relative_to(state_dir)
+    if '..' in target.parts or not (directory / 'progress.log').is_file():
+        raise ValueError('Progress target must exist inside the issue directory')
+    link = state_dir / 'progress.log'
+    if link.exists() and not link.is_symlink():
+        history = state_dir / 'progress-history.log'
+        if history.exists():
+            history = state_dir / f'progress-history-{uuid.uuid4().hex}.log'
+        link.rename(history)
+    temporary = state_dir / f'.progress-link-{uuid.uuid4().hex}'
+    try:
+        temporary.symlink_to(target)
+        os.replace(temporary, link)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class CLIProgress:
@@ -23,13 +44,15 @@ class CLIProgress:
             'event_count': 0, 'commands_completed': 0, 'commands_failed': 0,
             'last_activity': 'Preparing CLI invocation', 'last_output_at': None,
         }
+        self.diagnostics.append(self.directory / 'progress.log', '')
+        link_progress_log(worker.state_dir, directory)
         self.write('Preparing one uninterrupted CLI run')
         self.snapshot()
 
     def write(self, message, console=False):
         text = f'[{stamp()}] run={self.worker.run_id} round={self.data["round"]} {message}\n'
         self.diagnostics.append(self.directory / 'progress.log', text)
-        self.diagnostics.append(self.worker.state_dir / 'progress.log', text)
+        self.diagnostics.append(self.worker.state_dir / 'progress-history.log', text)
         if console:
             print(self.diagnostics.redact(f'issue #{self.worker.number}: {message}'), flush=True)
 

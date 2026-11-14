@@ -12,6 +12,7 @@ from dispatch import Dispatcher, arguments as dispatch_arguments
 from worker import Worker, arguments as worker_arguments
 from test_worker import FakeAPI
 from result_fixture import SESSION_ID, model_result
+from progress import CLIProgress
 
 
 class ProgressTests(unittest.TestCase):
@@ -24,6 +25,25 @@ class ProgressTests(unittest.TestCase):
         self.worker = Worker(self.api, 1, root=self.directory / 'repo', state_dir=self.directory / 'state',
                              cli_timeout=5, progress_interval=0.2)
         self.worker.root.mkdir()
+
+    def test_link_switches_runs_without_losing_history_or_duplicating_lines(self):
+        current = self.worker.state_dir / 'progress.log'
+        current.write_text('legacy history\n')
+        for number in (1, 2):
+            self.worker.state['rounds'] = number
+            directory = self.worker.state_dir / 'runs' / f'round-{number}'
+            directory.mkdir(parents=True)
+            progress = CLIProgress(self.worker, directory)
+            progress.write(f'unique-round-{number}')
+            self.assertTrue(current.is_symlink())
+            self.assertFalse(current.readlink().is_absolute())
+            self.assertEqual(current.resolve(), (directory / 'progress.log').resolve())
+            self.assertEqual(current.read_text().count(f'unique-round-{number}'), 1)
+        self.assertNotIn('unique-round-1', current.read_text())
+        history = (self.worker.state_dir / 'progress-history.log').read_text()
+        self.assertTrue(history.startswith('legacy history\n'))
+        self.assertEqual(history.count('unique-round-1'), 1)
+        self.assertEqual(history.count('unique-round-2'), 1)
 
     def test_real_process_repairs_test_failure_without_cli_restart_and_reports_live_progress(self):
         initial = [

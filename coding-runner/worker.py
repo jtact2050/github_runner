@@ -25,6 +25,10 @@ class ModelRunError(JobError):
     """The CLI exited without a usable completed result."""
 
 
+class ModelCapacityError(ModelRunError):
+    """The provider explicitly reported temporary model capacity exhaustion."""
+
+
 class RetryDeferred(JobError):
     """Preserved work can be reconsidered on the next dispatcher poll."""
 
@@ -619,6 +623,11 @@ Previous model-call error (JSON, if any):
                            artifacts=str(directory.relative_to(self.state_dir)))
                 progress.data.update(exit_code=process.returncode, status='validating_result')
                 progress.poll(exit_code=process.returncode)
+        if reader.failure and 'selected model is at capacity' in reader.failure.lower():
+            if not reader.session_id and not self.state.get('codex_session'):
+                self.state.pop('codex_pending_events', None)
+                self.save()
+            raise ModelCapacityError(reader.failure)
         if process.returncode:
             raise ModelRunError(f'Codex exited {process.returncode}; see private {log_path.relative_to(self.state_dir)}')
         if not reader.session_id:
@@ -724,6 +733,26 @@ Previous model-call error (JSON, if any):
                 self.save(pr=pr['number'], pr_url=pr['html_url'])
         self.request_review()
 
+    def run_with_capacity_retry(self, issue, reason, feedback):
+        timeout = self.cli_timeout
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                try:
+                    return self.run_codex(issue, reason, feedback)
+                except ModelCapacityError as error:
+                    if deadline - time.monotonic() <= 2:
+                        raise
+                    self.save(last_model_error=str(error))
+                    self.event('model_capacity_retry', delay_seconds=2, model=self.model)
+                    self.log('Model is at capacity; retrying the saved session in 2 seconds')
+                    time.sleep(2)
+                    self.cli_timeout = deadline - time.monotonic()
+                    if self.cli_timeout <= 0:
+                        raise
+        finally:
+            self.cli_timeout = timeout
+
     def work(self, issue, reason, feedback):
         # Recover both the handoff and review feedback after a host/container restart.
         continuation = self.state.get('continuation') or {}
@@ -757,7 +786,7 @@ Previous model-call error (JSON, if any):
             with self.round_history(issue, reason, feedback):
                 self.integrate_base()
                 try:
-                    result = self.run_codex(issue, reason, feedback)
+                    result = self.run_with_capacity_retry(issue, reason, feedback)
                     validate_result(result)
                 except (JobError, subprocess.SubprocessError, OSError) as error:
                     self.save(last_model_error=str(error), model_failures=self.state.get('model_failures', 0) + 1)
@@ -858,7 +887,16 @@ Previous model-call error (JSON, if any):
                     self.event('ci_annotations_failed', check_run_id=check_id, error=str(error))
                     item['diagnostics_error'] = str(error)
             if match or check_id:
-                item['diagnostics_pending'] = not bool(item.get('log_excerpt'))
+                # Cancelled jobs may never start and therefore have neither logs
+                # nor annotations. Their terminal status is sufficient feedback;
+                # waiting for nonexistent logs must not hold up other CI repairs.
+                # Keep the cancellation in feedback and in the merge gate.
+                cancelled_without_logs = item.get('conclusion') == 'cancelled' and not item.get('log_excerpt')
+                item['diagnostics_pending'] = not bool(item.get('log_excerpt')) and not cancelled_without_logs
+                if cancelled_without_logs:
+                    item['diagnostics_note'] = (
+                        'Job was cancelled; no logs or failure annotations are available. '
+                        'Cancellation is not a passing check; verify the subsequent CI run.')
             if item.get('diagnostics_error'):
                 item['diagnostics_error'] = item['diagnostics_error'].replace(self.api.token, '[redacted]')
             result.append(item)
