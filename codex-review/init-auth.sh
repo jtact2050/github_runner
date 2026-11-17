@@ -15,3 +15,10 @@ done
 printf 'cli_auth_credentials_store = "file"\n' > "$local_home/config.toml"
 chown codex:codex "$local_home/config.toml"
 chmod 600 "$local_home/config.toml"
+# Claude shares only the long-lived subscription token file.
+claude_shared=/home/codex/.claude-auth
+install -d -m 700 -o codex -g codex "$claude_shared"
+if [[ -f "$claude_shared/oauth-token" ]]; then
+  chown codex:codex "$claude_shared/oauth-token"
+  chmod 600 "$claude_shared/oauth-token"
+fi

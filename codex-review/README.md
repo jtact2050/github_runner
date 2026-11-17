@@ -1,6 +1,10 @@
-# Dedicated Codex PR review runner
+# Dedicated AI PR review runner (Claude or Codex)
 
 One Docker container listens for GitHub Actions jobs labeled `codex-review`.
+Reviews run with **Claude Code CLI by default**; set `REVIEW_PROVIDER=codex` to use
+Codex CLI instead (see [Switching between Claude and Codex](#switching-between-claude-and-codex)).
+Both providers get the same prompt, JSON schema, approval policy and GitHub flow.
+The `codex-review` names (label, workflow, container) are kept for compatibility.
 The workflow reviews new PRs, new commits (`synchronize`), reopened PRs, PRs
 marked ready, review requests, and edited PRs. Drafts are skipped. Use the
 workflow's **Run workflow** action with a PR number to force another review.
@@ -37,7 +41,21 @@ Run these commands from `/Users/jokul/github-runner` (or your copy of this folde
    docker compose -f compose.codex-review.yml up -d --build
    ```
 
-4. Log in manually inside the container:
+4. Log in to Claude (default provider) with your Claude subscription:
+
+   ```sh
+   docker compose -f compose.codex-review.yml exec codex-review /opt/codex-review/claude-login.sh
+   ```
+
+   This runs `claude setup-token`: open the printed URL, approve, then paste the
+   token it prints back into the hidden prompt. The long-lived subscription token
+   is saved to `credentials/claude/oauth-token` (mode 0600). It does not refresh,
+   so every container can share it without refresh races. Alternatively run
+   `claude setup-token` on any machine and pipe the token in with
+   `... exec -T codex-review /opt/codex-review/claude-login.sh --stdin`.
+   Repeat when the token expires or is revoked.
+
+   For Codex (only needed when `REVIEW_PROVIDER=codex`), log in with:
 
    ```sh
    docker compose -f compose.codex-review.yml exec codex-review /opt/codex-review/login.sh
@@ -65,6 +83,33 @@ Run these commands from `/Users/jokul/github-runner` (or your copy of this folde
 5. Install `.github/workflows/codex-review.yml` in the target repository's default
    branch. Give **jacktian8888** write access to the repository. The workflow uses
    `permissions: {}` because the controller authenticates with the saved account.
+
+## Switching between Claude and Codex
+
+`REVIEW_PROVIDER` in `.env` selects the CLI: `claude` (default) or `codex`. Then
+recreate the idle reviewer (add `-f compose.codex-review.apparmor.yml` on Ubuntu):
+
+```sh
+docker compose -f compose.codex-review.yml up -d --no-deps codex-review
+```
+
+The listener waits until the selected provider is logged in. Both CLIs are always
+installed, so switching needs no rebuild. Review history, round counting and the
+review marker are shared, so a PR keeps its round number across a switch. The
+review heading names the provider (`## Claude review` / `## Codex review`).
+
+Claude reviews use `claude-opus-5-5` with `high` effort; override with
+`REVIEW_CLAUDE_MODEL` / `REVIEW_CLAUDE_EFFORT` in `.env`. Claude Code is pinned to
+`2.1.326`; override `REVIEW_CLAUDE_VERSION` to upgrade, then rebuild.
+
+Claude runs headless (`claude -p`) as the `codex` UID with a fresh config home per
+review, `--restricted` (no user/project settings, file tools confined to the review
+directory), no MCP servers, no session persistence, and only Read/Grep/Glob plus
+Bash limited to `git`, `pdfinfo` and `pdftotext`. Bash additionally runs in Claude
+Code's bubblewrap sandbox with no network and no read access to the credential
+folders; it refuses to start if the sandbox cannot be set up. The token is passed
+on a one-shot file descriptor, never in an environment variable. On Ubuntu the
+AppArmor override below is required for this sandbox, as it is for Codex.
 
 ## Operation
 
@@ -96,6 +141,7 @@ CLI logins are stored in separate local folders beside the Compose file:
 
 ```text
 credentials/
+  claude/     # Shared Claude subscription token (claude setup-token)
   codex/      # Shared live Codex login only
   gh-review/  # jacktian8888 — mounted only in the review runner
   gh-coding/  # jtact2050 — mounted only in coding containers
@@ -243,6 +289,10 @@ Restrict this persistent
 runner to trusted repositories and workflow definitions.
 
 ## Verification
+
+After logging in to Claude, confirm the reviewer works with a manual run of the
+workflow (**Run workflow** with a PR number). Each run's private diagnostics
+`stdout.log` holds Claude's JSON envelope, including `permission_denials`.
 
 ```sh
 python3 -m unittest discover -s codex-review/tests -v

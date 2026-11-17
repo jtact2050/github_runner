@@ -42,9 +42,26 @@ if [[ ! -f .runner ]]; then
 fi
 unset RUNNER_TOKEN
 # Register before waiting, because GitHub registration tokens expire quickly.
-# The listener only starts after the operator has completed Codex login.
-until sudo -H -u codex env CODEX_HOME="$CODEX_HOME" codex login status >/dev/null 2>&1; do
-  echo 'Codex login required. Run: docker compose -f compose.codex-review.yml exec codex-review /opt/codex-review/login.sh'
-  sleep 30
-done
+# The listener only starts after the operator has logged in to the selected CLI.
+provider=${REVIEW_PROVIDER:-claude}
+provider=${provider,,}
+case $provider in
+  claude)
+    until sudo -H -u codex test -s /home/codex/.claude-auth/oauth-token; do
+      echo 'Claude login required. Run: docker compose -f compose.codex-review.yml exec codex-review /opt/codex-review/claude-login.sh'
+      sleep 30
+    done
+    ;;
+  codex)
+    until sudo -H -u codex env CODEX_HOME="$CODEX_HOME" codex login status >/dev/null 2>&1; do
+      echo 'Codex login required. Run: docker compose -f compose.codex-review.yml exec codex-review /opt/codex-review/login.sh'
+      sleep 30
+    done
+    ;;
+  *)
+    echo "REVIEW_PROVIDER must be 'claude' or 'codex' (got '$provider')" >&2
+    exit 1
+    ;;
+esac
+echo "AI review provider: $provider"
 exec ./run.sh

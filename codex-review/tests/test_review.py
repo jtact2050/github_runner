@@ -315,7 +315,7 @@ class ReviewTests(unittest.TestCase):
 
 
 class DiagnosticTests(unittest.TestCase):
-    def invoke(self, directory, program, timeout=False, context=None):
+    def invoke(self, directory, program, timeout=False, context=None, provider="codex"):
         real_popen = subprocess.Popen
 
         def launch(command, **kwargs):
@@ -327,7 +327,7 @@ class DiagnosticTests(unittest.TestCase):
 
         with patch.dict(r.os.environ, {"REVIEW_DIAGNOSTICS_DIR": str(directory)}), \
              patch.object(r.subprocess, "Popen", side_effect=launch):
-            return r.run_codex(directory.parent, BASE, HEAD, BASE, {"app.py"}, context)
+            return r.run_review_cli(directory.parent, BASE, HEAD, BASE, {"app.py"}, context, provider)
 
     def test_prompt_uses_round_policy_and_focused_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,6 +399,99 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(outcome["error_type"], "TimeoutExpired")
             self.assertIsNotNone(outcome["returncode"])
             self.assertLess(outcome["elapsed_seconds"], 5)
+
+
+class ProviderTests(unittest.TestCase):
+    def envelope(self, result, **overrides):
+        return {"type": "result", "subtype": "success", "is_error": False,
+                "result": json.dumps(result), "structured_output": result, **overrides}
+
+    def test_claude_is_default_and_codex_is_selectable(self):
+        with patch.dict(r.os.environ, {}, clear=True):
+            self.assertEqual(r.review_provider(), "claude")
+        with patch.dict(r.os.environ, {"REVIEW_PROVIDER": " Codex "}):
+            self.assertEqual(r.review_provider(), "codex")
+        with patch.dict(r.os.environ, {"REVIEW_PROVIDER": "other"}):
+            with self.assertRaisesRegex(r.ReviewError, "REVIEW_PROVIDER"):
+                r.review_provider()
+
+    def test_claude_command_is_sandboxed_and_credential_free(self):
+        command = r.claude_command()
+        self.assertEqual(command[:6], ["sudo", "-H", "-u", "codex", "env", "-i"])
+        self.assertIn("/opt/codex-review/isolated-claude.sh", command)
+        for flag in ("--restricted", "--strict-mcp-config", "--no-session-persistence"):
+            self.assertIn(flag, command)
+        self.assertEqual(command[command.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(command[command.index("--tools") + 1], "Bash,Read,Grep,Glob")
+        settings = json.loads(command[command.index("--settings") + 1])
+        self.assertTrue(settings["sandbox"]["enabled"])
+        self.assertTrue(settings["sandbox"]["failIfUnavailable"])
+        self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
+        self.assertIn("/home/codex/.claude-auth", settings["sandbox"]["filesystem"]["denyRead"])
+        self.assertIn("Read(//home/codex/.claude-auth/**)", settings["permissions"]["deny"])
+        self.assertEqual(json.loads(command[command.index("--json-schema") + 1]),
+                         json.loads(r.SCHEMA_PATH.read_text()))
+        self.assertFalse(any("TOKEN" in part or "secret" in part.lower() for part in command))
+        with patch.dict(r.os.environ, {"CLAUDE_MODEL": "claude-sonnet-5-5", "CLAUDE_EFFORT": "max"}):
+            command = r.claude_command()
+        self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-5-5")
+        self.assertEqual(command[command.index("--effort") + 1], "max")
+
+    def test_claude_envelope_requires_success_and_structured_output(self):
+        self.assertEqual(r.parse_claude_output(self.envelope(CLEAN)), CLEAN)
+        for bad in (self.envelope(CLEAN, is_error=True),
+                    self.envelope(CLEAN, subtype="error_max_turns"),
+                    self.envelope(None), CLEAN, []):
+            with self.assertRaises(r.ReviewError):
+                r.parse_claude_output(bad)
+
+    def test_claude_run_parses_envelope_and_uses_claude_wrapper(self):
+        seen = []
+        real_popen = subprocess.Popen
+        program = ("import sys; prompt = sys.stdin.read(); assert 'Tool limits' in prompt; "
+                   f"print({json.dumps(self.envelope({**CLEAN, 'findings': [FINDING]}))!r})")
+
+        def launch(command, **kwargs):
+            seen.append(command)
+            return real_popen([sys.executable, "-c", program], **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "diagnostics"
+            with patch.dict(r.os.environ, {"REVIEW_DIAGNOSTICS_DIR": str(directory)}), \
+                 patch.object(r.subprocess, "Popen", side_effect=launch):
+                result = r.run_review_cli(directory.parent, BASE, HEAD, BASE, {"app.py"}, None, "claude")
+            self.assertEqual(result["findings"], [FINDING])
+            self.assertIn("/opt/codex-review/isolated-claude.sh", seen[0])
+            saved, = directory.iterdir()
+            self.assertEqual(json.loads((saved / "outcome.json").read_text())["provider"], "claude")
+
+    def test_claude_error_envelope_never_posts(self):
+        envelope = self.envelope(None, is_error=True, subtype="error_during_execution")
+        program = f"print({json.dumps(envelope)!r})"
+        real_popen = subprocess.Popen
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "diagnostics"
+            api = FakeGitHub()
+            with patch.dict(r.os.environ, {"REVIEW_DIAGNOSTICS_DIR": str(directory),
+                                           "REVIEW_PROVIDER": "claude"}), \
+                 patch.object(r.subprocess, "Popen",
+                              side_effect=lambda c, **k: real_popen([sys.executable, "-c", program], **k)), \
+                 patch.object(r, "prepare", return_value=(BASE, {"app.py"})), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(r.ReviewError, "Claude did not return"):
+                    r.review(api, 1)
+            self.assertEqual(api.posts, [])
+
+    def test_review_body_names_selected_provider(self):
+        api = FakeGitHub()
+        for provider, label in (("claude", "Claude"), ("codex", "Codex")):
+            api.posts.clear()
+            with patch.dict(r.os.environ, {"REVIEW_PROVIDER": provider}), \
+                 patch.object(r, "prepare", return_value=(BASE, {"app.py"})), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                r.review(api, 1, reviewer=lambda *args: copy.deepcopy(CLEAN))
+            self.assertTrue(api.posts[0]["body"].startswith(f"## {label} review"))
+            self.assertIn(r.marker(BASE, HEAD), api.posts[0]["body"])
 
 
 class GitIntegrationTests(unittest.TestCase):

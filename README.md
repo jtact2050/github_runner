@@ -1,7 +1,7 @@
 # GitHub runners
 
 Docker-based GitHub Actions runners, an unattended issue coding dispatcher, and
-an independent Codex PR review runner. This repository contains the runner source,
+an independent AI PR review runner (Claude Code CLI by default, Codex optional). This repository contains the runner source,
 tests, container definitions, and workflow examples. Application repositories and
 private runtime state stay outside version control.
 
@@ -26,7 +26,7 @@ test -f .env || cp .env.example .env
 ```
 
 Set `GITHUB_URL` and any required registration tokens in `.env`. Follow the component
-guides above for GitHub and Codex login, account permissions, and first registration.
+guides above for GitHub, Claude and Codex login, account permissions, and first registration.
 The current coding/review configuration uses separate GitHub identities; see those
 guides before adapting it to another account.
 

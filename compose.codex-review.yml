@@ -7,18 +7,24 @@ services:
       dockerfile: Dockerfile.codex-review
       args:
         CODEX_CLI_VERSION: ${REVIEW_CODEX_VERSION:-0.165.0}
+        CLAUDE_CLI_VERSION: ${REVIEW_CLAUDE_VERSION:-2.1.326}
     image: codex-pr-review-runner:local
     container_name: github-codex-review
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
-    # Keep Docker's syscall filter, with the namespace calls needed by bubblewrap.
+    # Keep Docker's syscall filter, with the namespace calls needed by bubblewrap
+    # (Codex's sandbox and Claude's Bash sandbox).
     security_opt:
       - seccomp=./codex-review/seccomp.json
     environment:
       GITHUB_URL: ${GITHUB_URL:?Set GITHUB_URL in .env}
       RUNNER_TOKEN: ${REVIEW_RUNNER_TOKEN:-}
       RUNNER_NAME: ${CODEX_RUNNER_NAME:-codex-pr-review-1}
+      # claude (default) or codex. Change REVIEW_PROVIDER in .env, then recreate.
+      REVIEW_PROVIDER: ${REVIEW_PROVIDER:-claude}
+      CLAUDE_MODEL: ${REVIEW_CLAUDE_MODEL:-claude-opus-5-5}
+      CLAUDE_EFFORT: ${REVIEW_CLAUDE_EFFORT:-high}
       CODEX_MODEL: gpt-6-astra
       CODEX_REASONING_EFFORT: high
       GH_CONFIG_DIR: /home/runner/.config/gh
@@ -27,6 +33,7 @@ services:
       - registration:/runner-state
       - work:/home/runner/_work
       - ./credentials/codex:/home/codex/.codex-auth
+      - ./credentials/claude:/home/codex/.claude-auth
       - ./credentials/gh-review:/home/runner/.config/gh
     # Generated CLI helpers and process locks belong to this container only.
     # Keep exec enabled for Codex's helper programs. CLI work runs concurrently.
