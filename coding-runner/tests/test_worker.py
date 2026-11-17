@@ -69,7 +69,7 @@ class WorkerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.api = FakeAPI()
-        self.worker = Worker(self.api, 1, state_dir=Path(self.temp.name))
+        self.worker = Worker(self.api, 1, provider='codex', state_dir=Path(self.temp.name))
         self.worker.save(pr=2, issue_digest=issue_digest(self.api.issue))
 
     def test_resume_fetches_remote_history_without_changing_worktree(self):
@@ -218,7 +218,7 @@ class WorkerTests(unittest.TestCase):
         with patch('worker.time.time', return_value=1900):
             self.worker.retry_stalled_review(self.api.pull, 'waiting')
         self.assertIn((endpoint, {'ref': 'main', 'inputs': {'pr_number': '2'}}, None), self.api.calls)
-        resumed = Worker(self.api, 1, state_dir=Path(self.temp.name))
+        resumed = Worker(self.api, 1, provider='codex', state_dir=Path(self.temp.name))
         with patch('worker.time.time', return_value=2799):
             resumed.retry_stalled_review(self.api.pull, 'waiting')
         self.assertEqual(sum(c[0] == endpoint for c in self.api.calls), 1)
@@ -282,7 +282,7 @@ class WorkerTests(unittest.TestCase):
             self.worker.verify_pr(self.api.pull)
 
     def test_parallel_workers_poll_only_their_own_pr_and_commit(self):
-        other = Worker(self.api, 3, state_dir=Path(self.temp.name) / 'issue-3')
+        other = Worker(self.api, 3, provider='codex', state_dir=Path(self.temp.name) / 'issue-3')
         other.save(pr=4)
         other_pr = copy.deepcopy(self.api.pull)
         other_pr.update(number=4, body=other.marker)
@@ -388,7 +388,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_another_issues_worker_state_is_rejected_on_restart(self):
         with self.assertRaisesRegex(JobError, 'Job state belongs to another issue'):
-            Worker(self.api, 3, state_dir=self.worker.state_dir)
+            Worker(self.api, 3, provider='codex', state_dir=self.worker.state_dir)
 
     def test_round_limit_blocks_before_execution(self):
         self.assertEqual(self.worker.max_rounds, 8)
@@ -562,7 +562,7 @@ class WorkerTests(unittest.TestCase):
         with patch.object(self.worker, 'integrate_base'), \
                 patch.object(self.worker, 'run_codex', return_value=unfinished), self.assertRaises(JobError):
             self.worker.work(self.api.issue, 'Fix CI', feedback)
-        resumed = Worker(self.api, 1, state_dir=self.worker.state_dir, max_rounds=2)
+        resumed = Worker(self.api, 1, provider='codex', state_dir=self.worker.state_dir, max_rounds=2)
         with patch.object(resumed, 'integrate_base'), \
                 patch.object(resumed, 'run_codex', return_value=model_result()) as run, \
                 patch.object(resumed, 'publish'):
@@ -632,7 +632,7 @@ class WorkerTests(unittest.TestCase):
         self.worker.save(manual_retry_required=True, blocked_issue_digest=issue_digest(self.api.issue),
                          blocker_pending={}, rounds=2, phase='blocked',
                          codex_session={'id': 'saved-session'})
-        resumed = Worker(self.api, 1, state_dir=self.worker.state_dir)
+        resumed = Worker(self.api, 1, provider='codex', state_dir=self.worker.state_dir)
         state = load_json(resumed.path)
         for key in ('manual_retry_required', 'blocked_issue_digest', 'blocker_pending'):
             self.assertNotIn(key, state)

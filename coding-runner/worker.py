@@ -17,7 +17,7 @@ import uuid
 from common import APIError, GitHub, JobError, issue_digest, load_json, remove_manual_retry_state, save_json, stamp
 from diagnostics import Diagnostics
 from progress import CLIProgress
-from session_events import SessionError, SessionEvents
+from session_events import ClaudeSessionEvents, SessionError, SessionEvents, valid_session_id
 from policy import checks_pass, current_review_checks, failed_checks, linked_issue, review_signal, safe_summary
 
 
@@ -35,6 +35,31 @@ class RetryDeferred(JobError):
 
 CODEX_TIMEOUT_SECONDS = 7200
 REVIEW_RETRY_SECONDS = 15 * 60
+# Coding CLI selected by CODING_PROVIDER (dispatcher) / --provider (worker).
+PROVIDERS = {'claude': 'Claude', 'codex': 'Codex'}
+DEFAULT_PROVIDER = 'claude'
+DEFAULT_MODELS = {'claude': 'claude-opus-5-5', 'codex': 'gpt-6-astra'}
+DEFAULT_EFFORT = 'high'
+RESULT_SCHEMA = Path(__file__).with_name('result-schema.json')
+CLAUDE_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep']
+# Claude's settings for unattended coding. User/project/local settings files are
+# not loaded (--setting-sources user with an empty per-issue config home), so a
+# repository cannot add hooks, permissions or MCP servers. CLAUDE.md is still read
+# as repository instructions, like Codex's AGENTS.md.
+CLAUDE_SETTINGS = {
+    'disableAllHooks': True,
+    'permissions': {
+        'deny': ['WebFetch', 'WebSearch', 'Bash(gh *)', 'Bash(git push *)',
+                 'Read(//home/codex/.claude-auth/**)', 'Read(//home/codex/.codex-auth/**)',
+                 'Read(//home/runner/**)', 'Read(//job-state/**)', 'Read(//proc/**)'],
+    },
+}
+
+
+def capacity_failure(text):
+    text = (text or '').lower()
+    return ('selected model is at capacity' in text or 'overloaded' in text
+            or 'http 529' in text)
 
 
 def validate_result(result):
@@ -47,15 +72,15 @@ def validate_result(result):
     if (not isinstance(result, dict) or result.get('status') not in ('completed', 'in_progress', 'blocked')
             or not string(result.get('summary'), 12000) or not strings(result.get('tests'))
             or not strings(result.get('next_steps')) or 'blocker' not in result):
-        raise ModelRunError('Invalid Codex result; return all required structured fields')
+        raise ModelRunError('Invalid model result; return all required structured fields')
     tests = result.get('test_results')
     if not isinstance(tests, list) or len(tests) > 100:
-        raise ModelRunError('Invalid Codex test_results')
+        raise ModelRunError('Invalid model test_results')
     for test in tests:
         if (not isinstance(test, dict) or not string(test.get('command'), 4000)
                 or not string(test.get('summary'), 4000) or 'exit_code' not in test
                 or (test['exit_code'] is not None and type(test['exit_code']) is not int)):
-            raise ModelRunError('Invalid Codex test command or exit code')
+            raise ModelRunError('Invalid model test command or exit code')
     blocker = result['blocker']
     if blocker is not None and (not isinstance(blocker, dict) or any(
             not string(blocker.get(key), 4000) for key in ('reason', 'owner', 'unblock_condition', 'evidence'))):
@@ -74,9 +99,14 @@ def ready_to_publish(result):
 class Worker:
     def __init__(self, api, issue_number, *, root=Path('/workspace/repo'), state_dir=Path('/job-state'),
                  reviewer='jacktian8888', poll=30, max_rounds=8, review_timeout=86400,
-                 model='gpt-6-astra', effort='high', cli_timeout=CODEX_TIMEOUT_SECONDS, progress_interval=30):
+                 model=None, effort=DEFAULT_EFFORT, cli_timeout=CODEX_TIMEOUT_SECONDS, progress_interval=30,
+                 provider=DEFAULT_PROVIDER):
         self.api, self.number, self.root, self.state_dir = api, issue_number, Path(root), Path(state_dir)
         self.reviewer, self.poll, self.max_rounds, self.review_timeout = reviewer, poll, max_rounds, review_timeout
+        if provider not in PROVIDERS:
+            raise ValueError("provider must be 'claude' or 'codex'")
+        self.provider, self.label = provider, PROVIDERS[provider]
+        model = model or DEFAULT_MODELS[provider]
         self.model, self.effort = model, effort
         if cli_timeout <= 0 or progress_interval <= 0:
             raise ValueError("CLI timeout and progress interval must be positive")
@@ -92,7 +122,7 @@ class Worker:
         self.diagnostics = Diagnostics(self.state_dir, api.repo, issue_number,
                                        run_id=self.run_id, token=getattr(api, 'token', None))
         self.api.observer = self.event
-        self.event('worker_started', state=self.state, model=model, effort=effort,
+        self.event('worker_started', state=self.state, provider=provider, model=model, effort=effort,
                    max_rounds=max_rounds, review_timeout=review_timeout, poll_seconds=poll,
                    cli_timeout_seconds=cli_timeout, progress_interval_seconds=progress_interval,
                    container_hostname=os.environ.get('HOSTNAME'))
@@ -102,6 +132,14 @@ class Worker:
         self.marker = f'<!-- codex-issue-worker:{api.repo}#{issue_number} -->'
         if remove_manual_retry_state(self.state):
             self.save()
+        if self.state.get('provider', provider) != provider:
+            # Conversations cannot move between CLIs. The workspace, previous
+            # result and feedback carry over; the other CLI's session is kept.
+            self.event('provider_switched', previous=self.state['provider'], provider=provider)
+            self.log(f"coding CLI switched from {self.state['provider']} to {provider}; "
+                     f"starting a {self.label} conversation over the preserved workspace")
+        if self.state.get('provider') != provider:
+            self.save(provider=provider)
 
     def save(self, **fields):
         self.state.update(fields, updated_at=stamp())
@@ -313,7 +351,7 @@ class Worker:
         directory.mkdir(parents=True, mode=0o700)
         started = time.monotonic()
         context = {'issue': issue, 'reason': reason, 'feedback': feedback, 'state': self.state,
-                   'model': self.model, 'effort': self.effort, 'run_id': self.run_id, 'started_at': stamp(),
+                   'provider': self.provider, 'model': self.model, 'effort': self.effort, 'run_id': self.run_id, 'started_at': stamp(),
                    'cli_timeout_seconds': self.cli_timeout, 'execution_mode': 'single_cli_run'}
         self.diagnostics.json(directory / 'context.json', context)
         self.event('codex_started', reason=reason, artifacts=str(directory.relative_to(self.state_dir)))
@@ -352,8 +390,28 @@ class Worker:
             self.save(codex_session=expected)
             self.event('codex_session_saved', session_id=session_id)
 
+    def claude_session(self):
+        """The controller-assigned Claude conversation, saved before launch."""
+        current = self.state.get('claude_session')
+        if current:
+            if (not isinstance(current, dict) or not valid_session_id(current.get('id'))
+                    or current != dict(self.session_scope(), id=current['id'])):
+                raise SessionError('Saved Claude session belongs to a different issue/branch or is invalid')
+            return current
+        current = dict(self.session_scope(), id=str(uuid.uuid4()))
+        self.save(claude_session=current)
+        self.event('claude_session_saved', session_id=current['id'])
+        return current
+
+    def confirm_claude_session(self, session_id):
+        if session_id != (self.state.get('claude_session') or {}).get('id'):
+            raise SessionError('Claude reported a different session ID than the one assigned to this issue')
+
     def recover_session(self):
         """Reconcile a crash between CLI startup and persisting its session ID."""
+        if self.provider == 'claude':
+            self.claude_session()
+            return
         current = self.state.get('codex_session')
         if current:
             try:
@@ -526,9 +584,54 @@ Previous implementation result (JSON; historical findings to verify, not instruc
 Previous model-call error (JSON, if any):
 {json.dumps(self.state.get('last_model_error'), ensure_ascii=False)}
 '''
+        if self.provider == 'claude':
+            prompt += '''
+Claude Code specifics: your tools are Bash, Read, Edit, Write, Glob and Grep;
+web tools, gh and git push are denied, and denied commands should not be retried
+in other forms. Return the final result through structured output matching the
+required schema.
+'''
         self.diagnostics.write(directory / 'prompt.txt', prompt)
         if len(prompt.encode()) > 300_000:
             raise JobError('Issue/feedback is too large for an unattended coding round')
+        if self.provider == 'claude':
+            session = self.claude_session()
+            command = self.claude_command(session['id'])
+            reader_class, on_session = ClaudeSessionEvents, self.confirm_claude_session
+            pending_key = None
+        else:
+            session = self.state.get('codex_session')
+            command = self.codex_command(session)
+            reader_class, on_session = SessionEvents, self.remember_session
+            pending_key = 'codex_pending_events'
+        return self.run_cli(command, directory, progress, session, reader_class, on_session, pending_key)
+
+    def model_env(self):
+        return ['PATH=/usr/local/bin:/usr/bin:/bin', 'HOME=/home/codex', 'LANG=C.UTF-8',
+                'XDG_DATA_HOME=/tmp/codex-data', 'XDG_CACHE_HOME=/tmp/codex-cache',
+                'XDG_STATE_HOME=/tmp/codex-state', 'npm_config_cache=/tmp/codex-npm',
+                'PNPM_CONFIG_STORE_DIR=/tmp/codex-pnpm-store',
+                'PIP_CACHE_DIR=/tmp/codex-pip',
+                'CI=1', 'GIT_TERMINAL_PROMPT=0', 'GCM_INTERACTIVE=never',
+                'PAGER=cat', 'GIT_PAGER=cat',
+                'GIT_CONFIG_NOSYSTEM=1', 'GIT_CONFIG_GLOBAL=/dev/null',
+                'GIT_CONFIG_COUNT=1', 'GIT_CONFIG_KEY_0=safe.directory', 'GIT_CONFIG_VALUE_0=' + str(self.root)]
+
+    def claude_command(self, session_id):
+        # The per-issue config home keeps the conversation across rounds and
+        # container restarts. --setting-sources user + an empty config home means
+        # no repository or user settings; --strict-mcp-config skips .mcp.json.
+        return ['sudo', '-H', '-u', 'codex', 'env', '-i', *self.model_env(),
+                'CLAUDE_CONFIG_DIR=' + str(self.root.parent / '.claude'),
+                '/opt/codex-coding/claude-coding.sh', '--claude-session', session_id,
+                '-p', '--output-format', 'stream-json', '--verbose',
+                '--tools', ','.join(CLAUDE_TOOLS), '--allowedTools', *CLAUDE_TOOLS,
+                '--permission-mode', 'dontAsk', '--setting-sources', 'user',
+                '--settings', json.dumps(CLAUDE_SETTINGS), '--strict-mcp-config',
+                '--disable-slash-commands', '--json-schema', RESULT_SCHEMA.read_text(),
+                '--model', self.model, '--effort', self.effort]
+
+    def codex_command(self, session):
         command = ['sudo', '-H', '-u', 'codex', 'env', '-i', 'PATH=/usr/local/bin:/usr/bin:/bin',
                    'HOME=/home/codex', 'CODEX_HOME=' + str(self.root.parent / '.codex'), 'LANG=C.UTF-8',
                    'CODEX_SQLITE_HOME=' + str(self.root.parent / '.codex-runtime'),
@@ -549,20 +652,23 @@ Previous model-call error (JSON, if any):
                    'exec', '--sandbox', 'workspace-write', '--color', 'never',
                    '-c', 'sandbox_workspace_write.network_access=true',
                    '-c', 'model_reasoning_effort=' + json.dumps(self.effort)]
-        session = self.state.get('codex_session')
         if session:
             command.append('resume')
         command += ['--ignore-user-config', '--ignore-rules', '--json', '--model', self.model,
-                   '--output-schema', str(Path(__file__).with_name('result-schema.json')), '-']
+                   '--output-schema', str(RESULT_SCHEMA), '-']
         if session:
             command.insert(len(command) - 1, session['id'])
+        return command
+
+    def run_cli(self, command, directory, progress, session, reader_class, on_session, pending_key):
         clean = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': '/home/runner', 'LANG': 'C.UTF-8'}
         log_path = directory / 'stderr.log'
         output_path = directory / 'stdout.log'
         self.diagnostics.json(directory / 'command.json', command)
-        self.save(codex_pending_events=str(output_path.relative_to(self.state_dir)))
+        if pending_key:
+            self.save(**{pending_key: str(output_path.relative_to(self.state_dir))})
         self.event('codex_session_resuming' if session else 'codex_session_starting',
-                   session_id=session['id'] if session else None)
+                   session_id=session['id'] if session else None, provider=self.provider)
         # Give stdin the complete saved prompt, so a slow startup or a prompt
         # larger than a pipe buffer cannot strand input across polling timeouts.
         # Direct files also preserve output on timeout, SIGTERM or controller death.
@@ -577,7 +683,7 @@ Previous model-call error (JSON, if any):
                 progress.data['termination_requested'] = 'SIGTERM'
                 raise JobError('Coding job interrupted; retry resumes its saved workspace')
             signal.signal(signal.SIGTERM, cancel)
-            reader = SessionEvents(events, self.remember_session, progress.on_event)
+            reader = reader_class(events, on_session, progress.on_event)
             deadline = time.monotonic() + self.cli_timeout
             try:
                 progress.process_started(process.pid)
@@ -623,27 +729,29 @@ Previous model-call error (JSON, if any):
                            artifacts=str(directory.relative_to(self.state_dir)))
                 progress.data.update(exit_code=process.returncode, status='validating_result')
                 progress.poll(exit_code=process.returncode)
-        if reader.failure and 'selected model is at capacity' in reader.failure.lower():
-            if not reader.session_id and not self.state.get('codex_session'):
-                self.state.pop('codex_pending_events', None)
+        label = self.label
+        if capacity_failure(reader.failure):
+            if pending_key and not reader.session_id and not self.state.get('codex_session'):
+                self.state.pop(pending_key, None)
                 self.save()
             raise ModelCapacityError(reader.failure)
         if process.returncode:
-            raise ModelRunError(f'Codex exited {process.returncode}; see private {log_path.relative_to(self.state_dir)}')
+            raise ModelRunError(f'{label} exited {process.returncode}; see private {log_path.relative_to(self.state_dir)}'
+                                + (f': {reader.failure}' if reader.failure and self.provider == 'claude' else ''))
         if not reader.session_id:
-            raise SessionError('Codex did not emit a session ID; refusing to lose conversation continuity')
+            raise SessionError(f'{label} did not emit a session ID; refusing to lose conversation continuity')
         if reader.failure or not reader.completed:
-            raise ModelRunError(reader.failure or 'Codex did not finish its turn')
+            raise ModelRunError(reader.failure or f'{label} did not finish its turn')
         stdout = reader.last_message
         if stdout is None:
-            raise ModelRunError('Codex returned no final agent message')
+            raise ModelRunError(f'{label} returned no final agent message')
         self.diagnostics.write(directory / 'final-message.txt', stdout)
         if len(stdout.encode()) > 100_000:
-            raise ModelRunError('Codex output exceeded size limit')
+            raise ModelRunError(f'{label} output exceeded size limit')
         try:
             result = json.loads(stdout)
         except (ValueError, UnicodeError) as error:
-            raise ModelRunError('Codex returned invalid JSON; inspect saved stdout') from error
+            raise ModelRunError(f'{label} returned invalid JSON; inspect saved stdout') from error
         validate_result(result)
         self.diagnostics.json(directory / 'result.json', result)
         self.diagnostics.json(self.state_dir / f"result-{self.state['rounds']}.json", result)
@@ -1092,8 +1200,10 @@ def arguments(argv=None):
     parser.add_argument('--repo', required=True)
     parser.add_argument('--issue', required=True, type=int)
     parser.add_argument('--reviewer', default='jacktian8888')
-    parser.add_argument('--model', default='gpt-6-astra')
-    parser.add_argument('--effort', default='high')
+    parser.add_argument('--provider', choices=sorted(PROVIDERS), default=DEFAULT_PROVIDER,
+                        help='coding CLI (default claude)')
+    parser.add_argument('--model', help='default: claude-opus-5-5 for Claude, gpt-6-astra for Codex')
+    parser.add_argument('--effort', default=DEFAULT_EFFORT)
     parser.add_argument('--max-rounds', type=int, default=8)
     parser.add_argument('--review-timeout', type=int, default=86400)
     parser.add_argument('--poll-seconds', type=int, default=30)
@@ -1107,7 +1217,8 @@ def main():
     worker = None
     try:
         api = GitHub(args.repo, '/home/runner/.config/gh', 'jtact2050')
-        worker = Worker(api, args.issue, reviewer=args.reviewer, model=args.model, effort=args.effort,
+        worker = Worker(api, args.issue, reviewer=args.reviewer, provider=args.provider,
+                        model=args.model, effort=args.effort,
                         max_rounds=args.max_rounds, review_timeout=args.review_timeout, poll=args.poll_seconds,
                         cli_timeout=args.cli_timeout, progress_interval=args.progress_interval)
         worker.run()

@@ -1,7 +1,8 @@
 # GitHub runners
 
 Docker-based GitHub Actions runners, an unattended issue coding dispatcher, and
-an independent AI PR review runner (Claude Code CLI by default, Codex optional). This repository contains the runner source,
+an independent AI PR review runner. Both the coding and review runners use Claude
+Code CLI by default (`CODING_PROVIDER` / `REVIEW_PROVIDER` in `.env` switch to Codex). This repository contains the runner source,
 tests, container definitions, and workflow examples. Application repositories and
 private runtime state stay outside version control.
 

@@ -24,7 +24,7 @@ class DiagnosticTests(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.api = SimpleNamespace(repo='owner/repo', login='owner', user_id=1, token='private-token',
                                    repository=lambda: {'default_branch': 'main'})
-        self.worker = Worker(self.api, 1, root=self.directory / 'repo', state_dir=self.directory / 'state')
+        self.worker = Worker(self.api, 1, provider='codex', root=self.directory / 'repo', state_dir=self.directory / 'state')
         self.worker.root.mkdir()
         self.issue = {'number': 1, 'title': 'Fix regression', 'body': 'Expected behavior', 'state': 'open'}
 
@@ -117,7 +117,7 @@ class DiagnosticTests(unittest.TestCase):
     def test_new_worker_appends_to_same_issue_history_with_new_run_id(self):
         self.worker.save(rounds=2)
         before = (self.worker.state_dir / 'issue-log.jsonl').read_bytes()
-        other = Worker(self.api, 1, root=self.worker.root, state_dir=self.worker.state_dir)
+        other = Worker(self.api, 1, provider='codex', root=self.worker.root, state_dir=self.worker.state_dir)
         self.assertNotEqual(other.run_id, self.worker.run_id)
         self.assertTrue((self.worker.state_dir / 'issue-log.jsonl').read_bytes().startswith(before))
         self.assertEqual(self.events()[-1]['round'], 2)

@@ -21,6 +21,11 @@ from policy import linked_issue, queue_issues, ordered_milestones
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = 'codex-issue-worker:local'
 ACTIVE = {'launching', 'running'}
+PROVIDERS = ('claude', 'codex')
+DEFAULT_MODELS = {'claude': 'claude-opus-5-5', 'codex': 'gpt-6-astra'}
+EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
+# Login files each coding CLI needs, relative to ROOT.
+PROVIDER_CREDENTIALS = {'claude': 'credentials/claude/oauth-token', 'codex': 'credentials/codex/auth.json'}
 
 
 def unsatisfied_dependencies(blockers):
@@ -104,7 +109,8 @@ class Dispatcher:
         worker = load_json(path, {})
         if directory.is_symlink():
             raise JobError('Workspace must be a real directory inside this issue folder')
-        used = worker.get('rounds', 0) or worker.get('workspace_ready') or worker.get('codex_session')
+        used = (worker.get('rounds', 0) or worker.get('workspace_ready') or worker.get('codex_session')
+                or worker.get('claude_session'))
         if worker.get('workspace_storage') != 'bind' and (used or worker.get('workspace_volume')):
             raise JobError('Legacy volume-based job state must be archived or migrated before starting with host folders')
         if used and not directory.is_dir():
@@ -308,19 +314,22 @@ class Dispatcher:
                     '--cpus', str(self.args.cpus), '--memory', self.args.memory, '--pids-limit', '1024',
                     '--security-opt', f'seccomp={ROOT / "codex-review/seccomp.json"}',
                     '--mount', 'type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock',
-                    '--mount', f'type=bind,source={ROOT / "credentials/codex"},target=/home/codex/.codex-auth',
+                    # Only the selected CLI's login is mounted into the job.
+                    '--mount', (f'type=bind,source={ROOT / "credentials/claude"},target=/home/codex/.claude-auth'
+                                if self.args.provider == 'claude' else
+                                f'type=bind,source={ROOT / "credentials/codex"},target=/home/codex/.codex-auth'),
                     '--mount', f'type=bind,source={ROOT / "credentials/gh-coding"},target=/home/runner/.config/gh',
                     '--mount', f'type=bind,source={job_dir},target=/job-state',
                     '--mount', f'type=bind,source={workspace},target=/workspace',
                     '--tmpfs', '/workspace/.codex/tmp:rw,exec,nosuid,nodev,mode=0700,uid=1002,gid=1002,size=64m',
                     IMAGE, '--repo', self.api.repo, '--issue', str(number), '--reviewer', 'jacktian8888',
-                    '--model', self.args.model, '--effort', self.args.effort,
+                    '--provider', self.args.provider, '--model', self.args.model, '--effort', self.args.effort,
                     '--max-rounds', str(self.args.max_rounds), '--review-timeout', str(self.args.review_timeout),
                     '--cli-timeout', str(self.args.cli_timeout), '--progress-interval', str(self.args.progress_interval),
                     '--poll-seconds', str(self.args.review_poll_seconds)]
             self.diagnostics(number).event('container_launch_requested', container=name,
                                            workspace_folder=str(workspace), milestone=milestone,
-                                           model=self.args.model, effort=self.args.effort)
+                                           provider=self.args.provider, model=self.args.model, effort=self.args.effort)
             try:
                 launched = self.run_worker_container(number, args)
             except Exception as error:
@@ -546,16 +555,21 @@ def positive(value):
     return number
 
 
-def configured_apparmor_profile():
-    if 'CODEX_APPARMOR_PROFILE' in os.environ:
-        return os.environ['CODEX_APPARMOR_PROFILE'] or None
+def configured(name):
+    """A non-secret setting from the environment, else from .env (never sourced)."""
+    if name in os.environ:
+        return os.environ[name] or None
     path = ROOT / '.env'
     if path.is_file():
         for line in reversed(path.read_text().splitlines()):
             key, separator, value = line.strip().partition('=')
-            if separator and key == 'CODEX_APPARMOR_PROFILE':
+            if separator and key == name:
                 return value.strip().strip('\"\'') or None
     return None
+
+
+def configured_apparmor_profile():
+    return configured('CODEX_APPARMOR_PROFILE')
 
 
 def arguments(argv=None):
@@ -570,8 +584,13 @@ def arguments(argv=None):
     parser.add_argument('--max-rounds', type=positive, default=8,
                         help='total CLI runs for retries and CI/review revisions across restarts (default 8)')
     parser.add_argument('--milestones', type=lambda value: [int(n) for n in value.split(',')], help='eligible milestone numbers in priority order, e.g. 2,3,4')
-    parser.add_argument('--model', default='gpt-6-astra')
-    parser.add_argument('--effort', choices=['low', 'medium', 'high', 'xhigh'], default='high')
+    parser.add_argument('--provider', type=str.lower, choices=PROVIDERS,
+                        default=(configured('CODING_PROVIDER') or 'claude').lower(),
+                        help='coding CLI: claude (default) or codex (or CODING_PROVIDER in .env)')
+    parser.add_argument('--model', help='default: CODING_CLAUDE_MODEL / CODING_CODEX_MODEL from .env, '
+                                        'else claude-opus-5-5 (Claude) or gpt-6-astra (Codex)')
+    parser.add_argument('--effort', type=str.lower, choices=EFFORTS,
+                        help='default: CODING_CLAUDE_EFFORT / CODING_CODEX_EFFORT from .env, else high')
     parser.add_argument('--cpus', type=positive, default=2)
     parser.add_argument('--memory', default='8g')
     parser.add_argument('--apparmor-profile', default=configured_apparmor_profile(),
@@ -588,6 +607,13 @@ def arguments(argv=None):
         parser.error('--dry-run cannot be combined with restart or build')
     if args.drain and (args.restart_closed_pr or args.build_only or args.once):
         parser.error('--drain cannot be combined with restart, build, or once')
+    if args.provider not in PROVIDERS:
+        parser.error('CODING_PROVIDER must be claude or codex')
+    prefix = 'CODING_' + args.provider.upper() + '_'
+    args.model = args.model or configured(prefix + 'MODEL') or DEFAULT_MODELS[args.provider]
+    args.effort = (args.effort or configured(prefix + 'EFFORT') or 'high').lower()
+    if args.effort not in EFFORTS or (args.provider == 'codex' and args.effort == 'max'):
+        parser.error(f'unsupported {args.provider} effort: {args.effort}')
     return args
 
 
@@ -644,7 +670,8 @@ def main():
     if args.dry_run:
         dispatcher.tick()
         return
-    for required in ('credentials/codex/auth.json', 'credentials/gh-coding/hosts.yml'):
+    print(f'Coding CLI: {args.provider} (model {args.model}, effort {args.effort})', flush=True)
+    for required in (PROVIDER_CREDENTIALS[args.provider], 'credentials/gh-coding/hosts.yml'):
         path = ROOT / required
         try:
             present = path.is_file()

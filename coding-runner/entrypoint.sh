@@ -17,6 +17,8 @@ if [[ $(id -u) == 0 ]]; then
   # Credentials remain links to the shared login; they are never copied into this folder.
   CODEX_HOME=/workspace/.codex /opt/codex-review/init-auth.sh
   install -d -m 700 -o codex -g codex /workspace/.codex-runtime
+  # Claude's per-issue config home keeps its conversation across rounds/restarts.
+  install -d -m 700 -o codex -g codex /workspace/.claude
   if [[ -S /var/run/docker.sock ]]; then
     socket_gid="$(stat -c '%g' /var/run/docker.sock)"
     socket_group="$(getent group "$socket_gid" | cut -d: -f1 || true)"
@@ -33,7 +35,7 @@ if [[ $(id -u) == 0 ]]; then
       chmod 600 "/home/runner/.config/gh/$file"
     fi
   done
-  # Codex login is shared; CLI execution and temporary files are independent.
+  # The CLI login is shared; CLI execution and temporary files are independent.
   exec runuser -u runner -- /opt/codex-coding/entrypoint.sh "$@"
 fi
 umask 0002

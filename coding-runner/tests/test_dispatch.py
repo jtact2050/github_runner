@@ -330,7 +330,44 @@ class DispatchTests(unittest.TestCase):
         for call in calls:
             self.assertFalse(any(isinstance(a, str) and a.startswith('type=volume,') for a in call))
             self.assertFalse(any(isinstance(a, str) and a.endswith('target=/home/codex/.codex') for a in call))
-            self.assertTrue(any(isinstance(a, str) and a.endswith('target=/home/codex/.codex-auth') for a in call))
+            # Claude is the default; only its login is mounted.
+            self.assertTrue(any(isinstance(a, str) and a.endswith('target=/home/codex/.claude-auth') for a in call))
+            self.assertFalse(any(isinstance(a, str) and a.endswith('target=/home/codex/.codex-auth') for a in call))
+            self.assertEqual(call[call.index('--provider') + 1], 'claude')
+            self.assertEqual(call[call.index('--model') + 1], 'claude-opus-5-5')
+            self.assertEqual(call[call.index('--effort') + 1], 'high')
+
+    def test_codex_provider_mounts_only_codex_login(self):
+        self.args.provider, self.args.model = 'codex', 'gpt-6-astra'
+        with patch('dispatch.inspect_container', return_value=None), \
+                patch('dispatch.docker', return_value=SimpleNamespace(stdout='container-id')) as launch, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.queue.launch(1, 1)
+        args = launch.call_args.args
+        self.assertTrue(any(isinstance(a, str) and a.endswith('target=/home/codex/.codex-auth') for a in args))
+        self.assertFalse(any(isinstance(a, str) and a.endswith('target=/home/codex/.claude-auth') for a in args))
+        self.assertEqual(args[args.index('--provider') + 1], 'codex')
+        self.assertEqual(args[args.index('--model') + 1], 'gpt-6-astra')
+
+    def test_provider_model_and_effort_from_dotenv_and_cli(self):
+        env = Path(self.temp.name) / '.env'
+        with patch.dict('os.environ', {}, clear=True):
+            args = arguments([])
+            self.assertEqual((args.provider, args.model, args.effort), ('claude', 'claude-opus-5-5', 'high'))
+            env.write_text('CODING_PROVIDER=codex\nCODING_CODEX_EFFORT=xhigh\n')
+            args = arguments([])
+            self.assertEqual((args.provider, args.model, args.effort), ('codex', 'gpt-6-astra', 'xhigh'))
+            env.write_text('CODING_PROVIDER=Claude\nCODING_CLAUDE_MODEL=claude-sonnet-5-5\nCODING_CLAUDE_EFFORT=max\n')
+            args = arguments([])
+            self.assertEqual((args.provider, args.model, args.effort), ('claude', 'claude-sonnet-5-5', 'max'))
+            args = arguments(['--provider', 'codex', '--model', 'other', '--effort', 'low'])
+            self.assertEqual((args.provider, args.model, args.effort), ('codex', 'other', 'low'))
+            for bad in (['--provider', 'codex', '--effort', 'max'],):
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                    arguments(bad)
+            env.write_text('CODING_PROVIDER=gemini\n')
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                arguments([])
 
     def test_apparmor_profile_is_added_without_removing_seccomp(self):
         self.args.apparmor_profile = 'codex-runner'

@@ -21,7 +21,7 @@ class SessionTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
         self.api = FakeAPI()
-        self.worker = Worker(self.api, 1, root=self.directory / 'repo', state_dir=self.directory / 'state')
+        self.worker = Worker(self.api, 1, provider='codex', root=self.directory / 'repo', state_dir=self.directory / 'state')
         self.worker.root.mkdir()
 
     def run_cli(self, worker, session_id=SESSION_ID):
@@ -81,7 +81,7 @@ class SessionTests(unittest.TestCase):
         session = load_json(self.worker.path)['codex_session']
         self.assertEqual(session, {'id': SESSION_ID, 'repo': self.api.repo, 'issue': 1, 'branch': 'codex/issue-1'})
         second = self.run_cli(self.worker)
-        restarted = Worker(self.api, 1, root=self.worker.root, state_dir=self.worker.state_dir)
+        restarted = Worker(self.api, 1, provider='codex', root=self.worker.root, state_dir=self.worker.state_dir)
         third = self.run_cli(restarted)
         for command in (second, third):
             self.assertIn('resume', command)
@@ -165,7 +165,7 @@ class SessionTests(unittest.TestCase):
         self.run_cli(self.worker)
         fresh = {'repo': self.api.repo, 'issue': 1, 'rounds': 0, 'handled': [], 'branch': 'codex/issue-1-retry-new'}
         save_json(self.worker.path, fresh)
-        restarted = Worker(self.api, 1, root=self.worker.root, state_dir=self.worker.state_dir)
+        restarted = Worker(self.api, 1, provider='codex', root=self.worker.root, state_dir=self.worker.state_dir)
         command = self.run_cli(restarted, session_id='0199a213-81c0-7800-8aa1-bbab2a035a55')
         self.assertNotIn('resume', command)
 

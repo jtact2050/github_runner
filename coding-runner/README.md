@@ -20,13 +20,64 @@ Every new and resumed coding invocation is unattended: the model must make
 context-based implementation decisions, record material assumptions, and continue
 without asking questions or waiting for confirmation. Commands must use explicit,
 non-interactive options without watch mode or login/setup wizards. The worker sets
-`CI=1`, disables Git credential prompts, and uses plain-output pagers; Codex runs
-with `-a never`, and stdin reads the complete saved prompt file through EOF.
+`CI=1`, disables Git credential prompts, and uses plain-output pagers; Claude runs
+with `-p --permission-mode dontAsk` (Codex with `-a never`), and stdin reads the
+complete saved prompt file through EOF.
 Prompt delivery does not depend on pipe capacity or startup speed. These settings do not
 make every third-party command non-interactive, so the model must stop and replace
 commands that still request input. Actual missing external dependencies are recorded
 as structured blockers after independent work is finished; production approval and
 review gates still apply.
+
+## Coding CLI: Claude (default) or Codex
+
+`CODING_PROVIDER` in `.env` selects the CLI used by coding containers: `claude`
+(default) or `codex`. `--provider` overrides it for one dispatcher run. Restart the
+dispatcher after changing it; already-running containers keep their CLI until they
+exit, and the next launch uses the new setting. Both CLIs are installed in the
+image, so switching needs no rebuild.
+
+| Provider | Default model | Default effort | Overrides (`.env`) |
+| --- | --- | --- | --- |
+| `claude` | `claude-opus-5-5` | `high` | `CODING_CLAUDE_MODEL`, `CODING_CLAUDE_EFFORT` |
+| `codex` | `gpt-6-astra` | `high` | `CODING_CODEX_MODEL`, `CODING_CODEX_EFFORT` |
+
+`--model` / `--effort` on the dispatcher override both. Claude accepts
+`low|medium|high|xhigh|max`; Codex accepts `low|medium|high|xhigh`.
+
+Claude uses the same subscription token as the review runner
+(`credentials/claude/oauth-token`, created with
+`docker compose -f compose.codex-review.yml exec codex-review /opt/codex-review/claude-login.sh`).
+Only the selected CLI's login folder is mounted into a coding container. The token
+reaches Claude on a one-shot file descriptor, never in an environment variable.
+
+How Claude runs (`coding-runner/claude-coding.sh`, as the `codex` UID):
+
+- Headless `claude -p --output-format stream-json --verbose` with the same prompt,
+  result schema (`--json-schema`), timeout, progress heartbeats and diagnostics as
+  Codex. The final `result` event's `structured_output` is the round result.
+- The controller assigns the conversation ID before launch and saves it as
+  `claude_session` in `worker.json`. The first run uses `--session-id <id>`; later
+  rounds (retries, CI/review fixes, restarts) use `--resume <id>`. The conversation
+  lives in the issue's `/workspace/.claude` config home and survives container
+  replacement, like `/workspace/.codex`.
+- Tools: Bash, Read, Edit, Write, Glob, Grep, auto-approved by `dontAsk`; file
+  edits outside the checkout are not auto-approved. WebFetch/WebSearch, `gh`,
+  `git push` and reading the credential folders are denied.
+- No user, project or local settings files are loaded (`--setting-sources user`
+  with an empty per-issue config home), hooks are disabled and `.mcp.json` is
+  ignored, so the repository cannot add hooks, permissions or MCP servers.
+  `CLAUDE.md` is still read as repository instructions, as Codex reads `AGENTS.md`.
+- Claude's Bash tool is **not** OS-sandboxed here: it needs network access, package
+  registries and the Docker socket for `pnpm test:all`. The container, separate
+  UID, the deny rules and the prompt are the boundary (Codex's `workspace-write`
+  sandbox also allows network and full-disk reads).
+- An overloaded/HTTP 529 result is treated like Codex's `Selected model is at
+  capacity` and retried after two seconds with the same session.
+
+Switching an in-flight issue to the other CLI starts a new conversation for that
+CLI over the preserved workspace. The previous result, feedback and saved session
+of the other CLI are kept, so switching back resumes its old conversation.
 
 ## Accounts and parallel execution
 
@@ -68,8 +119,8 @@ docker run --rm --network none --user 1002:1002 \
   **Codex calls run concurrently; no whole-session lock is used.** Default coding
   concurrency is 2; the review runner is independent and is not counted in those
   two slots. A worker waiting for review still occupies a slot.
-- Both coding and review default to **gpt-6-astra, high effort**. Coding can be
-  customized with `--model` and `--effort`; review settings remain in its Compose file.
+- Coding and review both default to **Claude, claude-opus-5-5, high effort**
+  (see above). Review settings remain in its Compose file and `.env`.
 
 Login once to Codex using the existing review runner's login helper. All coding
 containers immediately use the same cache. `tmp` is a separate tmpfs inside each
@@ -205,7 +256,7 @@ This policy is sent on every new and resumed invocation. Rebuild the coding imag
 to apply prompt changes to newly launched containers; existing invocations retain
 their original prompt until stopped and resumed with the rebuilt image.
 
-An implementation attempt uses one `codex exec` process. The AI implements the
+An implementation attempt uses one CLI process (`claude -p` or `codex exec`). The AI implements the
 issue, runs relevant tests, diagnoses failures, fixes them, and repeats validation
 inside that process until its local work is complete. The default wall-clock
 limit is **7200 seconds (2 hours)**; `--cli-timeout SECONDS` changes it. This is a
@@ -236,7 +287,7 @@ automatic pickup.
 
 The container stays available through PR creation, CI, review and merge. New CI
 failures or reviewer feedback can start a separate uninterrupted revision run
-using `codex exec resume <SESSION_ID>`. Each revision also gets the configured
+using `claude --resume <SESSION_ID>` or `codex exec resume <SESSION_ID>`. Each revision also gets the configured
 CLI timeout. The `--max-rounds` budget counts CLI invocations across automatic
 retries, base integration, and review/CI revisions, not individual test/fix steps
 within a process. If the budget is exhausted during integration, the merge and
@@ -292,7 +343,8 @@ tail -F .coding-state/238b90463879/jobs/16/progress.log
 cat .coding-state/238b90463879/jobs/16/progress.json
 ```
 
-When the provider reports `Selected model is at capacity`, the worker waits two
+When the provider reports `Selected model is at capacity` (Codex) or an
+overloaded/HTTP 529 error (Claude), the worker waits two
 seconds and retries the same model with the saved session and workspace. Capacity
 retries share the current round and its original CLI timeout budget; each retry
 keeps separate diagnostic files. Other errors follow the normal retry policy.
@@ -444,7 +496,8 @@ is necessary. `--restart-closed-pr ISSUE` remains available for older scripts.
 The old workspace is retained for recovery and never mounted into the new attempt.
 
 Only login credentials are shared: `credentials/codex` is mounted at
-`/home/codex/.codex-auth`, with auth-file links from `/workspace/.codex`.
+`/home/codex/.codex-auth`, with auth-file links from `/workspace/.codex`
+(Claude: `credentials/claude` at `/home/codex/.claude-auth`, read by the wrapper).
 The Codex home and `/workspace/.codex-runtime` are private to that issue's folder
 and survive container replacement. They sit outside `/workspace/repo`, so they
 are not committed. Credentials remain symlinks to the shared login; no credential
@@ -474,6 +527,7 @@ New coding jobs store their files together on the host:
   workspace/                  # bind-mounted as /workspace
     repo/                     # checkout, dependencies and test output
     .codex/                   # persistent Codex conversation and index
+    .claude/                  # persistent Claude conversation (CLAUDE_CONFIG_DIR)
     .codex-runtime/
   attempts/<attempt>/         # previous attempts, including their workspace
   legacy-workspaces/<volume>/ # verified archives of old named volumes

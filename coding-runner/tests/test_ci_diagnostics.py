@@ -71,7 +71,7 @@ class CIDiagnosticsTests(unittest.TestCase):
         self.worker.save(phase='waiting_ci_diagnostics', ci_diagnostics_started=1,
                          continuation={'issue_digest': issue_digest(self.api.issue),
                                        'reason': 'Fix CI', 'feedback': self.feedback})
-        resumed = Worker(self.api, 1, state_dir=self.worker.state_dir)
+        resumed = Worker(self.api, 1, provider='codex', state_dir=self.worker.state_dir)
         logs = [SimpleNamespace(returncode=0, stdout='TS2322: incompatible worker result', stderr=''),
                 SimpleNamespace(returncode=1, stdout='', stderr='gh: HTTP 404')]
         with patch.object(resumed, 'snapshot', return_value=('waiting', [], [self.check, cancelled], {})), \
@@ -133,7 +133,7 @@ class CIDiagnosticsTests(unittest.TestCase):
                              'reason': 'No logs', 'owner': 'Controller',
                              'unblock_condition': 'Provide logs', 'evidence': 'HTTP 404'}))
         self.api.issue['body'] = 'Updated requirements'
-        resumed = Worker(self.api, 1, state_dir=self.worker.state_dir)
+        resumed = Worker(self.api, 1, provider='codex', state_dir=self.worker.state_dir)
         with patch.object(resumed, 'snapshot', return_value=('waiting', [], [self.check], {})), \
                 patch('worker.subprocess.run', return_value=SimpleNamespace(
                     returncode=0, stdout='TS2345: fix nullable argument', stderr='')), \

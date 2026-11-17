@@ -22,7 +22,7 @@ class ProgressTests(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.api = FakeAPI()
         self.api.token = 'test-private-token'
-        self.worker = Worker(self.api, 1, root=self.directory / 'repo', state_dir=self.directory / 'state',
+        self.worker = Worker(self.api, 1, provider='codex', root=self.directory / 'repo', state_dir=self.directory / 'state',
                              cli_timeout=5, progress_interval=0.2)
         self.worker.root.mkdir()
 

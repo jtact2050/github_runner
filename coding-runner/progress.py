@@ -26,6 +26,19 @@ def link_progress_log(state_dir, directory):
         temporary.unlink(missing_ok=True)
 
 
+CLAUDE_EVENT_TYPES = {'system', 'assistant', 'user', 'result', 'rate_limit_event', 'stream_event'}
+CLAUDE_FILE_TOOLS = {'Edit', 'Write', 'MultiEdit', 'NotebookEdit'}
+
+
+def tool_detail(name, tool_input):
+    if not isinstance(tool_input, dict):
+        return name
+    for key in ('command', 'file_path', 'pattern', 'path', 'description'):
+        if isinstance(tool_input.get(key), str):
+            return f'{name}: {tool_input[key]}'
+    return name
+
+
 class CLIProgress:
     def __init__(self, worker, directory):
         self.worker, self.directory = worker, directory
@@ -50,6 +63,8 @@ class CLIProgress:
         self.snapshot()
 
     def write(self, message, console=False):
+        if not message:
+            return
         text = f'[{stamp()}] run={self.worker.run_id} round={self.data["round"]} {message}\n'
         self.diagnostics.append(self.directory / 'progress.log', text)
         self.diagnostics.append(self.worker.state_dir / 'progress-history.log', text)
@@ -71,6 +86,9 @@ class CLIProgress:
         self.diagnostics.append(self.directory / 'cli-events.jsonl', json.dumps(
             {'timestamp': stamp(), 'elapsed_seconds': round(self.last_output - self.started, 3),
              'stdout_offset': offset, 'event': event}, ensure_ascii=False) + '\n')
+        if kind in CLAUDE_EVENT_TYPES:
+            self.write(self.claude_event(event, kind))
+            return
         if kind == 'thread.started':
             self.data['session_id'] = event.get('thread_id')
         if 'usage' in event:
@@ -117,6 +135,73 @@ class CLIProgress:
             message += ' ' + json.dumps(event, ensure_ascii=False)
             self.data['last_activity'] = message[:4000]
         self.write(message)
+
+    def claude_event(self, event, kind):
+        """Track Claude stream-json tool calls like Codex items."""
+        elapsed = round(self.last_output - self.started, 3)
+        message = event.get('message') if isinstance(event.get('message'), dict) else {}
+        content = message.get('content') if isinstance(message.get('content'), list) else []
+        lines = []
+        if kind == 'system':
+            if event.get('subtype') == 'init':
+                self.data['session_id'] = event.get('session_id')
+                self.data['model'] = event.get('model')
+                lines.append(f"session started: model={event.get('model')}")
+            elif event.get('subtype') == 'thinking_tokens':
+                return ''
+            else:
+                lines.append('system ' + json.dumps(event, ensure_ascii=False)[:4000])
+        elif kind == 'assistant':
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get('type') == 'text' and (block.get('text') or '').strip():
+                    self.data['last_activity'] = block['text'][:4000]
+                    lines.append('assistant: ' + block['text'])
+                elif block.get('type') == 'tool_use':
+                    name, tool_input = block.get('name', 'tool'), block.get('input')
+                    detail = tool_detail(name, tool_input)
+                    self.data['last_activity'] = detail[:4000]
+                    if block.get('id'):
+                        self.active[block['id']] = {'id': block['id'], 'type': name, 'description': detail[:4000],
+                                                    'started_elapsed_seconds': elapsed}
+                    if name == 'TodoWrite':
+                        self.data['plan'] = tool_input
+                    elif name in CLAUDE_FILE_TOOLS and isinstance(tool_input, dict):
+                        self.data['latest_file_changes'] = [{'path': tool_input.get('file_path'), 'tool': name}]
+                    lines.append('tool_use ' + detail)
+            if message.get('usage'):
+                self.data['usage'] = message['usage']
+        elif kind == 'user':
+            for block in content:
+                if not isinstance(block, dict) or block.get('type') != 'tool_result':
+                    continue
+                active = self.active.pop(block.get('tool_use_id'), None)
+                output = block.get('content')
+                if not isinstance(output, str):
+                    output = json.dumps(output, ensure_ascii=False)
+                failed = bool(block.get('is_error'))
+                if active and active['type'] == 'Bash':
+                    self.data['commands_completed'] += 1
+                    self.data['commands_failed'] += failed
+                    # Claude reports failures, not numeric exit codes.
+                    self.data['last_command'] = {
+                        'command': active['description'], 'exit_code': None, 'status': 'failed' if failed else 'completed',
+                        'duration_seconds': round(elapsed - active['started_elapsed_seconds'], 3)}
+                label = active['description'] if active else block.get('tool_use_id')
+                lines.append(f"tool_result {label} [error={failed}]\n{output[:8000]}")
+        elif kind == 'result':
+            if event.get('usage'):
+                self.data['usage'] = event['usage']
+            self.data['last_activity'] = f"result: {event.get('subtype')}"
+            lines.append(f"result {event.get('subtype')}: is_error={event.get('is_error')}, "
+                         f"turns={event.get('num_turns')}, terminal_reason={event.get('terminal_reason')}")
+        elif kind == 'rate_limit_event':
+            info = event.get('rate_limit_info') or {}
+            if info.get('status') == 'allowed':
+                return ''
+            lines.append('rate limit ' + json.dumps(info, ensure_ascii=False))
+        return '\n'.join(lines)
 
     def poll(self, exit_code=None, force=False):
         now = time.monotonic()
