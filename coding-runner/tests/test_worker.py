@@ -87,6 +87,61 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(git.call_args.kwargs['auth'])
         self.assertEqual(pending.read_text(), 'preserved work')
 
+    def interrupted_workspace(self):
+        """Real repository left by a first setup whose base fetch timed out."""
+        base = Path(self.temp.name)
+        origin, root = base / 'origin', base / 'repo'
+        quiet = {'check': True, 'capture_output': True}
+        subprocess.run(['git', 'init', '-b', 'main', str(origin)], **quiet)
+        (origin / 'README.md').write_text('base\n')
+        subprocess.run(['git', '-C', str(origin), 'add', 'README.md'], **quiet)
+        subprocess.run(['git', '-C', str(origin), '-c', 'user.name=t', '-c', 'user.email=t@example.com',
+                        'commit', '-m', 'base'], **quiet)
+        subprocess.run(['git', 'init', '-b', 'master', str(root)], **quiet)
+        subprocess.run(['git', '-C', str(root), 'remote', 'add', 'origin',
+                        f'https://github.com/{self.api.repo}.git'], **quiet)
+        self.worker.root = root
+        self.worker.state.pop('pr')
+        real = self.worker.git
+        calls = []
+
+        def git(*args, **kwargs):
+            calls.append(args)
+            if args[0] == 'ls-remote':
+                return SimpleNamespace(stdout='', returncode=0)
+            if args[0] == 'fetch':  # Serve "origin" from the local repository.
+                args = tuple(str(origin) if arg == 'origin' else arg for arg in args)
+                kwargs.pop('auth', None)
+            return real(*args, **kwargs)
+        return root, git, calls
+
+    def test_setup_resumes_initialization_interrupted_before_first_checkout(self):
+        root, git, _ = self.interrupted_workspace()
+        with patch.object(self.worker, 'git', side_effect=git):
+            self.worker.setup_repo()
+        branch = subprocess.run(['git', '-C', str(root), 'branch', '--show-current'],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(branch, self.worker.branch)
+        self.assertEqual((root / 'README.md').read_text(), 'base\n')
+        self.assertTrue(load_json(self.worker.path)['workspace_ready'])
+
+    def test_setup_never_reinitializes_workspace_with_untracked_files(self):
+        root, git, calls = self.interrupted_workspace()
+        (root / 'notes.txt').write_text('keep me')
+        with patch.object(self.worker, 'git', side_effect=git), \
+                self.assertRaisesRegex(JobError, r'unexpected branch \(master, expected codex/issue-1\)'):
+            self.worker.setup_repo()
+        self.assertFalse(any(call[0] in ('fetch', 'checkout') for call in calls))
+        self.assertEqual((root / 'notes.txt').read_text(), 'keep me')
+
+    def test_setup_never_reinitializes_a_workspace_marked_ready(self):
+        _, git, calls = self.interrupted_workspace()
+        self.worker.save(workspace_ready=True)
+        with patch.object(self.worker, 'git', side_effect=git), \
+                self.assertRaisesRegex(JobError, 'unexpected branch'):
+            self.worker.setup_repo()
+        self.assertEqual(calls, [('branch', '--show-current')])
+
     def test_merge_then_close_and_confirm_issue(self):
         with patch.object(self.worker, 'snapshot', return_value=('approved', [], [], {})):
             self.assertTrue(self.worker.merge_if_approved(self.api.pull.copy()))

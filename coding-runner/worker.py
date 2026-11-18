@@ -255,24 +255,53 @@ class Worker:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o2770)
             self.git('init')
             self.git('remote', 'add', 'origin', url)
-            self.git('fetch', '--no-tags', 'origin', self.base, auth=True)
-            if self.state.get('pr'):
-                self.git('fetch', 'origin', self.branch, auth=True)
-                self.git('checkout', '-b', self.branch, 'FETCH_HEAD')
-            else:
-                existing = self.git('ls-remote', '--heads', url, f'refs/heads/{self.branch}', auth=True)
-                if existing.stdout.strip():
-                    raise JobError('Job branch already exists without a matching managed PR')
-                self.git('checkout', '-b', self.branch, 'FETCH_HEAD')
-            self.save(workspace_ready=True)
+            self.create_job_branch(url)
+        current = self.git('branch', '--show-current').stdout.strip()
+        if current != self.branch and self.initialization_interrupted(url):
+            # An earlier run created .git but stopped (e.g. the base fetch timed
+            # out) before the first checkout. Nothing is committed, staged or
+            # untracked, so finishing initialization cannot discard work.
+            self.event('workspace_initialization_resumed', current_branch=current)
+            self.log('resuming interrupted workspace initialization')
+            if self.git('remote', 'get-url', 'origin', allow_failure=True).returncode:
+                self.git('remote', 'add', 'origin', url)
+            self.create_job_branch(url)
+            current = self.git('branch', '--show-current').stdout.strip()
         # Resume only the job's own branch. Never reset uncommitted work.
-        if self.git('branch', '--show-current').stdout.strip() != self.branch:
-            raise JobError('Workspace is on an unexpected branch')
+        if current != self.branch:
+            raise JobError(f'Workspace is on an unexpected branch ({current or "detached HEAD"}, '
+                           f'expected {self.branch})')
         # Squash merges leave evidence-referenced commits on the original PR
         # branches, outside main's ancestry. Fetch remote branch history into
         # this issue's own object store without changing its branch or files.
         self.git('fetch', '--no-tags', 'origin',
                  '+refs/heads/*:refs/remotes/origin/*', auth=True)
+
+    def create_job_branch(self, url):
+        self.git('fetch', '--no-tags', 'origin', self.base, auth=True)
+        if self.state.get('pr'):
+            self.git('fetch', 'origin', self.branch, auth=True)
+            self.git('checkout', '-b', self.branch, 'FETCH_HEAD')
+        else:
+            existing = self.git('ls-remote', '--heads', url, f'refs/heads/{self.branch}', auth=True)
+            if existing.stdout.strip():
+                raise JobError('Job branch already exists without a matching managed PR')
+            self.git('checkout', '-b', self.branch, 'FETCH_HEAD')
+        self.save(workspace_ready=True)
+
+    def initialization_interrupted(self, url):
+        """True only for an empty repository left by a failed first setup."""
+        if self.state.get('workspace_ready') or self.state.get('rounds'):
+            return False
+        # Exit 1 means HEAD is unborn; other failures mean an unreadable repository.
+        if self.git('rev-parse', '--verify', '--quiet', 'HEAD', allow_failure=True).returncode != 1:
+            return False
+        refs = self.git('for-each-ref', allow_failure=True)
+        status = self.git('status', '--porcelain', '--untracked-files=all', allow_failure=True)
+        if refs.returncode or refs.stdout.strip() or status.returncode or status.stdout.strip():
+            return False
+        remote = self.git('remote', 'get-url', 'origin', allow_failure=True)
+        return remote.returncode != 0 or remote.stdout.strip() == url
 
     def fetch_base(self):
         self.git('fetch', '--no-tags', 'origin', self.base, auth=True)
